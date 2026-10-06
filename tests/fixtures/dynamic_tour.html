@@ -1,0 +1,17 @@
+<!doctype html><html lang="vi"><head><meta charset="utf-8"><link rel="canonical" href="https://hanoitourist.vn/kham-pha-phu-quoc-hon-ngoc-vien-dong"></head><body>
+<article class="node--type-tour" data-history-node-id="8140"><div id="block-blocktourtitle"><h3>Tour động</h3></div>
+<div class="field--name-field-tour-content-markup">
+<div id="diemnoibat"><div class="view-content"></div></div>
+<div id="lichtrinh"><div class="view-content"><div class="accordion-item"><button class="accordion-button" data-bs-target="#day1" aria-expanded="false" onclick="document.querySelector('#day1').style.display='block';this.setAttribute('aria-expanded','true')">NGÀY 1</button><div id="day1" class="accordion-body" style="display:none">Nội dung ngày 1</div></div></div></div>
+<div id="lichkhoihanh"><div class="view-id-lich"><div class="view-content"><table class="footable"><tbody id="schedule-body"></tbody></table></div></div></div>
+<div id="baogom"><div class="view-content">Ăn sáng</div></div><div id="khongbaogom"><div class="view-content">Chi phí cá nhân</div></div>
+<div id="dieukien"><div class="view-content"></div></div><div id="ghichu"><div class="view-content"></div></div><div id="videos"><div class="view-content"></div></div></div>
+<div id="block-tourcommenttitle"><span class="sum-tour-comment"><a>0 Bình luận</a></span></div>
+<div class="view-tva-div"><img src="/one.jpg" alt="Tour image"></div></article>
+<div class="lich-khoi-hanh-book-tour"><div class="lich-gia-value">1,000đ</div><span class="detail-item-value">Từ: <strong>Hà Nội</strong></span><a href="/tour/8140/lich-khoi-hanh" class="reference">lịch</a><span>1 ngày 0 đêm</span><div class="link-xem-lich"><a class="use-ajax" href="/tour/8140/lich-khoi-hanh" onclick="openSchedule(event)">Các ngày khác</a></div></div>
+<script>
+function makeRow(id,date,price){return `<tr><td><span class="footable-toggle" onclick="expand(this)">+</span></td><td class="ngay-khoi-hanh">${date}</td><td class="cho-con-lai">0</td><td class="gia-tu">${price}đ</td><td class="dac-diem"></td><td class="table-giatien" style="display:none"><div class="table-giave"><table><tbody><tr><th>Loại giá</th><th>Người lớn</th><th>Trẻ em</th></tr><tr><th>Giá</th><td>${price}đ</td><td>0đ</td></tr><tr><th>Phòng đơn</th><td colspan="2">0đ</td></tr></tbody></table></div></td><td><a href="/tour/8140/lich/${id}/booking">Chọn</a></td></tr>`}
+function expand(toggle){const row=toggle.closest('tr');if(row.classList.contains('footable-expanded'))return;row.classList.add('footable-expanded');const detail=document.createElement('tr');detail.className='footable-detail-row';const td=document.createElement('td');td.colSpan=7;td.append(row.querySelector('.table-giave'));detail.append(td);row.after(detail)}
+function openSchedule(event){event.preventDefault();fetch('/tour/8140/lich-khoi-hanh?_wrapper_format=drupal_dialog',{method:'POST',body:'_drupal_ajax=1&js=true'}).then(r=>r.json()).then(commands=>{const dialog=document.createElement('div');dialog.setAttribute('role','dialog');dialog.innerHTML=commands.find(c=>c.command==='openDialog').data;document.body.append(dialog)})}
+setTimeout(()=>{document.querySelector('#schedule-body').innerHTML=makeRow('1','08/10/2026 12:00','1,000')+makeRow('2','25/10/2026 12:00','2,000')},500);
+</script></body></html>
