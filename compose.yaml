@@ -14,5 +14,40 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+  crawler:
+    build: .
+    profiles: [scheduler]
+    command: [hanoitourist, schedule]
+    init: true
+    shm_size: 1gb
+    restart: unless-stopped
+    user: "${CRAWLER_UID:-1000}:${CRAWLER_GID:-1000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${SCHEDULER_DATABASE_URL:-postgresql://crawler:crawler_local@postgres:5432/hanoitourist}
+      EXPORT_DIR: /app/exports
+      HEADLESS: "true"
+      RECHECK_DAYS: ${RECHECK_DAYS:-7}
+      DOMESTIC_LISTING_URL: ${DOMESTIC_LISTING_URL:-https://hanoitourist.vn/tour-trong-nuoc}
+      DISCOVERY_TIMEOUT: ${DISCOVERY_TIMEOUT:-300}
+      MAX_LISTING_PAGES: ${MAX_LISTING_PAGES:-50}
+      BATCH_TIMEOUT: ${BATCH_TIMEOUT:-21600}
+      SCHEDULE_TIME: ${SCHEDULE_TIME:-00:00}
+      SCHEDULE_TIMEZONE: ${SCHEDULE_TIMEZONE:-Asia/Ho_Chi_Minh}
+      SCHEDULER_POLL_INTERVAL: ${SCHEDULER_POLL_INTERVAL:-60}
+      NAVIGATION_TIMEOUT: ${NAVIGATION_TIMEOUT:-30}
+      RUN_TIMEOUT: ${RUN_TIMEOUT:-300}
+      MAX_STATES: ${MAX_STATES:-100}
+      MAX_PAGES: ${MAX_PAGES:-50}
+      MAX_DOCUMENT_BYTES: ${MAX_DOCUMENT_BYTES:-5242880}
+      MAX_RUN_BYTES: ${MAX_RUN_BYTES:-52428800}
+      REQUEST_INTERVAL: ${REQUEST_INTERVAL:-1}
+      MAX_RETRIES: ${MAX_RETRIES:-2}
+      USER_AGENT: ${USER_AGENT:-HanoitouristResearchCrawler/0.1}
+    volumes:
+      - ./exports:/app/exports
+    stop_grace_period: 30s
 volumes:
   postgres_data:

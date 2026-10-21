@@ -1,10 +1,31 @@
+import os
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from hanoitourist_crawler.cli import main
 from hanoitourist_crawler.models import uid
+
+
+@pytest.mark.parametrize('entry_point', ['console', 'module'])
+def test_installed_entry_points_outside_repository(entry_point, tmp_path):
+    env = dict(os.environ)
+    for key in ('DATABASE_URL', 'TEST_DATABASE_URL', 'PYTHONPATH'):
+        env.pop(key, None)
+    if entry_point == 'console':
+        executable = Path(sys.executable).with_name('hanoitourist')
+        assert executable.is_file()
+        prefix = [str(executable)]
+    else:
+        prefix = [sys.executable, '-m', 'hanoitourist_crawler']
+    for command in ([], ['db'], ['crawl'], ['crawl-domestic'], ['retry-domestic'],
+                    ['retry-report'], ['export-batch'], ['schedule'], ['parse'], ['export']):
+        result = subprocess.run(prefix + command + ['--help'], cwd=tmp_path, env=env,
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert 'usage:' in result.stdout
 
 
 def test_help_needs_no_database(monkeypatch):
@@ -13,6 +34,43 @@ def test_help_needs_no_database(monkeypatch):
     assert exc.value.code == 0
     result = subprocess.run([sys.executable, '-m', 'hanoitourist_crawler', '--help'], capture_output=True)
     assert result.returncode == 0
+
+
+@pytest.mark.parametrize('command', ['retry-domestic', 'retry-report'])
+def test_retry_help_needs_no_database(command, monkeypatch):
+    monkeypatch.delenv('DATABASE_URL', raising=False)
+    with pytest.raises(SystemExit) as exc:
+        main([command, '--help'])
+    assert exc.value.code == 0
+
+
+@pytest.mark.parametrize('argv', [
+    ['retry-domestic'], ['retry-domestic', '--source-batch-id', 'bad', '--url', 'https://hanoitourist.vn/a'],
+    ['retry-domestic', '--source-batch-id', '00000000-0000-0000-0000-000000000000'],
+    ['retry-report'], ['retry-report', '--batch-id', 'bad'],
+])
+def test_retry_required_arguments(argv):
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize('status,code', [('handled', 0), ('partial', 2), ('busy', 2)])
+def test_retry_cli_to_engine(monkeypatch, status, code, tmp_path):
+    from hanoitourist_crawler.models import BatchResult
+    monkeypatch.setenv('DATABASE_URL', 'postgresql://local/example')
+    fake = SimpleNamespace(close=lambda: None)
+    monkeypatch.setattr('hanoitourist_crawler.cli.Storage', lambda *a: fake)
+    calls = []
+    def engine(config, storage, batch, urls):
+        calls.append((config, storage, batch, urls))
+        return BatchResult(None, status)
+    monkeypatch.setattr('hanoitourist_crawler.workflows.retry.retry_domestic', engine)
+    bid = uid()
+    assert main(['retry-domestic', '--source-batch-id', bid, '--url', 'https://hanoitourist.vn/a',
+                 '--url', 'https://hanoitourist.vn/b', '--output-dir', str(tmp_path), '--headed']) == code
+    assert calls[0][0].headless is False
+    assert calls[0][1:] == (fake, bid, ['https://hanoitourist.vn/a', 'https://hanoitourist.vn/b'])
 
 
 def test_excel_export_argument():
@@ -90,3 +148,45 @@ def test_cli_formats_mixed_run_errors(monkeypatch, tmp_path, capsys):
     output = capsys.readouterr().out
     assert 'ERROR: robots denied' in output and 'ERROR: Parse failed (ValueError), parser=old' in output
     assert 'secret-password' not in output
+
+
+def test_domestic_arguments():
+    from hanoitourist_crawler.cli import arguments
+    args = arguments().parse_args(['crawl-domestic', '--headed', '--output-dir', 'out'])
+    assert args.headed and args.output_dir == 'out'
+    batch_id = uid()
+    assert arguments().parse_args(['export-batch', '--batch-id', batch_id]).batch_id == batch_id
+    assert arguments().parse_args(['schedule']).command == 'schedule'
+
+
+@pytest.mark.parametrize('status,code', [('complete',0),('partial',2),('failed',1),('busy',2)])
+def test_domestic_exit_codes(monkeypatch, tmp_path, status, code):
+    from hanoitourist_crawler.models import BatchResult
+    monkeypatch.setenv('DATABASE_URL', 'postgresql://local/example')
+    batch_id = uid() if status != 'busy' else None
+    fake = SimpleNamespace(close=lambda:None,get_batch=lambda *a:{'discovery_complete':True,'export_status':'complete'})
+    monkeypatch.setattr('hanoitourist_crawler.cli.Storage',lambda *a:fake)
+    monkeypatch.setattr('hanoitourist_crawler.cli.crawl_domestic',lambda *a:BatchResult(batch_id,status,{},{}))
+    assert main(['crawl-domestic','--output-dir',str(tmp_path)]) == code
+
+
+def test_html_partial_cli_reports_incomplete_discovery(monkeypatch, tmp_path, capsys):
+    from hanoitourist_crawler.models import BatchResult
+    monkeypatch.setenv('DATABASE_URL', 'postgresql://local/example')
+    batch_id = uid()
+    fake = SimpleNamespace(close=lambda:None, get_batch=lambda *a:{'discovery_complete':False,'export_status':'complete'})
+    monkeypatch.setattr('hanoitourist_crawler.cli.Storage', lambda *a:fake)
+    monkeypatch.setattr('hanoitourist_crawler.cli.crawl_domestic', lambda *a:BatchResult(
+        batch_id, 'partial', {'new':1}, {'full':tmp_path/'full.xlsx','delta':tmp_path/'delta.xlsx'}))
+    assert main(['crawl-domestic']) == 2
+    output = capsys.readouterr().out
+    assert 'status=partial' in output and 'discovery_terminal=False' in output and 'new=1' in output
+    assert 'full=' in output and 'delta=' in output
+
+
+def test_legacy_busy_is_partial(monkeypatch):
+    from hanoitourist_crawler.workflows.pipeline import CrawlBusy
+    monkeypatch.setenv('DATABASE_URL', 'postgresql://local/example')
+    monkeypatch.setattr('hanoitourist_crawler.cli.Storage',lambda *a:SimpleNamespace(close=lambda:None))
+    monkeypatch.setattr('hanoitourist_crawler.cli.crawl',lambda *a:(_ for _ in ()).throw(CrawlBusy()))
+    assert main(['crawl']) == 2

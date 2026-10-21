@@ -1,0 +1,12 @@
+.git
+.codegraph
+.env
+.venv
+__pycache__
+.pytest_cache
+*.egg-info
+build
+dist
+exports
+tests
+PLAN.md

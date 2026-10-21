@@ -1,410 +1,510 @@
-# Incremental loading — tour trong nước Hanoitourist
+# Tổ chức lại thư mục — dễ tìm đường đọc, không đổi hành vi crawler
 
-## Phạm vi đã chốt
+## 1. AGREED SCOPE và acceptance criteria
 
-- Quét danh mục `https://hanoitourist.vn/tour-trong-nuoc` và toàn bộ phân trang thuộc danh mục đó; không crawl tour nước ngoài, không dò toàn website.
-- Tận dụng dữ liệu đã crawl trong PostgreSQL. Tour mới lấy ngay; tour cũ kiểm tra lại sau **7 ngày tính từ lần capture + parse đầy đủ thành công gần nhất**.
-- Mỗi tour được chọn vẫn lấy đầy đủ nội dung, ngày lịch trình, ảnh/link, lịch khởi hành và ma trận giá như crawler hiện tại. Không dùng dữ liệu card danh mục thay cho dữ liệu chi tiết.
-- Đánh dấu tour đã crawl là không khả dụng khi biến mất khỏi một lần discovery đầy đủ thành công hoặc navigation trang chi tiết trả 404/410. Không xóa lịch sử. Timeout, 401/403, 429, 5xx, CAPTCHA, lỗi robots/parse không phải bằng chứng ngừng hoạt động.
-- Tour không khả dụng xuất hiện lại được crawl ngay, không chờ đủ 7 ngày; chỉ khôi phục khả dụng sau khi capture và parse đầy đủ thành công.
-- Sau mỗi batch có hai workbook XLSX: **delta** (tour mới, đổi dữ liệu, đổi trạng thái) và **full** (toàn bộ tour trong scope đã biết, kể cả không khả dụng).
-- Chạy tự động trên máy cá nhân bằng Docker Compose, mặc định **00:00 mỗi ngày, Asia/Ho_Chi_Minh**; cho phép đổi lịch bằng cấu hình. Bỏ lỡ nhiều lịch thì chạy bù **một** lượt cho mốc đến hạn gần nhất khi service hoạt động lại.
-- Không chạy chồng các lượt crawl. Không có UI, booking, login/payment, submit form, dịch vụ cloud hoặc yêu cầu thuê VM.
-- **Yêu cầu bổ sung:** trước mọi thay đổi implementation, khởi tạo Git local và commit trạng thái source/config/tests/docs hiện tại để có baseline đối chiếu/khôi phục. Không push remote hoặc commit secrets/dữ liệu runtime.
+**Nguồn xác nhận:** INTERVIEW của flow `1c28aa71-e400-4733-85ab-3a17ce7245f2`, handoff `/Users/ming/.pi/agent/flow-handoffs/1c28aa71-e400-4733-85ab-3a17ce7245f2/4b3434ca-6f71-4d6a-bf30-0585a28305e8.md`. User đồng ý bốn đề xuất bằng **“đồng ý”**, rồi xác nhận AGREED SCOPE cuối bằng **“ok”**.
 
-Đây là incremental ưu tiên **giảm request**: một lần kiểm tra đến hạn vẫn tạo run/raw/snapshot lịch sử riêng như hiện tại, kể cả nội dung không đổi; chỉ dữ liệu mới/thay đổi mới vào delta. Không thêm dedup/xóa raw hoặc thay hợp đồng lưu lịch sử để tiết kiệm DB.
+**Mục tiêu:** mở source ra biết nhóm nào làm gì và bắt đầu đọc từ đâu, thay vì phải nhớ nhiệm vụ của 24 file Python cùng cấp. Đây là thay đổi cách điều hướng code, không phải viết lại kiến trúc runtime.
 
-## Căn cứ khảo sát và giới hạn của ARCHITECT
+**Trong phạm vi:** nhóm source vào `workflows/`, `acquisition/`, `processing/`, `persistence/`, `reporting/`; giữ entry points và định nghĩa dùng chung ở package root; nhóm tests tương ứng, giữ shared conftest/fixtures; sửa import, monkeypatch paths, packaging và SQL resource lookup; thêm bản đồ/thứ tự đọc vào README và sửa hướng dẫn hiện hành bị ảnh hưởng.
 
-Đã đọc đầy đủ README, pyproject, Compose/env, các module config/models/storage/collector/parser/selectors/validation/pipeline/CLI/Excel/JSON/errors/normalize và các tests liên quan. CodeGraph `status`, `explore`, `query`, `node`, `callers`, `impact`, `affected` xác nhận:
+**Giữ nguyên:** console CLI `hanoitourist ...`, `python -m hanoitourist_crawler`, discovery/capture/parse/validation/completion/storage/export, retry/recovery/scheduler, accepted-snapshot/identity/transaction rules, cấu hình, schema SQL, versions/dependencies và output semantics. Cho phép đổi internal import paths; **không có old-path shim/re-export facade**.
 
-- `Config.validate()` hiện chỉ chấp nhận đúng URL Phú Quốc; không thể đơn giản loop qua URL danh mục bằng `Config.load()` hiện tại.
-- `crawl -> Collector.collect -> parse_run -> parse -> validate -> Storage.persist_snapshot` là pipeline đang dùng. Raw commit trước parse; snapshot/children atomic; replay idempotent theo `(run_id, parser_version)`.
-- `Collector.data_path/route` chỉ cho trang tour hiện tại và AJAX lịch của đúng node. Không được nới whitelist thành toàn bộ `hanoitourist.vn` để thêm discovery.
-- `Collector.collect` staging được response lỗi nhưng chưa có hợp đồng navigation rõ ràng để phân biệt 404 của trang tour với 404 của AJAX/resource.
-- `Storage.init_schema()` hiện chỉ chạy `sql/001_initial.sql`; chưa có catalogue, batch, watermark hay scheduler state.
-- `export_excel/_workbook` chỉ có một snapshot. Các tests Excel/CLI/export/storage/pipeline chịu tác động nếu thay interfaces cũ; phải giữ entrypoint và bố cục export một tour.
-- PostgreSQL, Playwright, BeautifulSoup, httpx và openpyxl đã có. Scheduler có thể dùng standard library, không cần APScheduler/Redis/Celery.
-- Package `0.1.5`, parser/collector `0.1.4`; README ghi 143 tests của lần nghiệm thu trước, **không phải** kết quả chạy trong bước ARCHITECT này.
+**Ngoài phạm vi:** tối ưu DB/Excel, deduplicate raw/coverage, sửa logic hoặc error taxonomy, thay interface functions/classes, migration/backfill, đổi dependency/version/config behavior, tách toàn bộ docs, di chuyển exports, live crawl, business DB, scheduler activation, Docker crawler build/deploy. Không mang quyền live của task cũ sang flow này.
 
-Repo chưa có `.git`, không có fixture danh mục trong nước, và chưa khảo sát live DOM/pager/robots của URL danh mục trong bước này. Không giả định selector listing hoặc whitelist AJAX từ markup của tour Phú Quốc. Bước 2 dưới đây là prerequisite kiểm chứng adapter khi IMPLEMENT, không phải yêu cầu đổi phạm vi hay phỏng đoán rằng discovery đã hỗ trợ site.
+| ID | Acceptance criteria đã được user xác nhận |
+| --- | --- |
+| AC1 | Source/tests được nhóm rõ, README có bản đồ và điểm bắt đầu/thứ tự đọc chính. |
+| AC2 | New import paths hoạt động; old flat source modules không còn, không shim; tất cả callers và string monkeypatch paths được sửa đồng bộ. |
+| AC3 | Normal installed package chạy được console và module CLI từ ngoài repo; SQL resources có trong wheel/bản cài đặt và schema initialization hoạt động. |
+| AC4 | Full offline suite chạy đạt với scratch PostgreSQL riêng và Chromium/native-loopback thật; required integration không skip. |
+| AC5 | Bảo toàn toàn bộ công việc trước flow, kể cả modified/untracked files; attribution dùng baseline của flow, không dùng toàn bộ HEAD diff làm task diff. |
 
-ARCHITECT chỉ thay `PLAN.md`; không tạo Git/commit, không chạy tests/crawl, không migrate DB, không build/install hay sửa source/config/fixtures/exports. Git baseline được tạo **đầu IMPLEMENT**, trước regression tests hoặc source edits.
+## 2. Hiện trạng đã xác minh
 
-## Hợp đồng dữ liệu và vận hành
+### 2.1 Baseline và việc thay PLAN cũ
 
-### A. Catalogue và watermark
+- Official baseline: `/Users/ming/.pi/agent/flow-baselines/bec0fc45-be5f-4884-a010-ec339136e616`; HEAD `cf915e3e3b8df8483d6b7a72a57a9accd691bce8`, captured `2026-10-20T15:48:10.346Z`, warnings empty.
+- Trước khi viết plan này: current tracked/staged patches khớp byte-for-byte với `tracked.patch`/`staged.patch`; `git status --porcelain=v1 -z --untracked-files=all` khớp `status.z`; cả **29 baseline untracked files** và private snapshots khớp hashes trong `untracked.json`. Staged patch đang rỗng.
+- Đã đọc **toàn bộ PLAN.md trước khi thay**. Đó là kế hoạch attempt-completion của flow cũ, SHA-256 `8d38ed0c19a1f285830cede88a6dfc7693a276787dff54779f76d0bf3e556155`, không phải scope của task này. Nội dung cũ còn được tái dựng từ official baseline. `attempts.py`, stopped helper, tests và GLOSSARY hiện có là công việc **trước flow**, không triển khai lại.
+- ARCHITECT chỉ thay `PLAN.md`; source/tests/config/README chưa được sửa. Không có sub-agent được dùng.
 
-- Tách **khả dụng** (`pending`, `available`, `unavailable`) khỏi **chất lượng snapshot** (`complete`, `partial`) và khỏi việc còn được **niêm yết trong danh mục**. Có card không đủ để xác nhận tour đã lấy đủ dữ liệu.
-- `current_snapshot_id` chỉ trỏ tới snapshot đã capture/parse `complete`. `latest_attempt_run_id` giữ attempt mới nhất, kể cả lỗi. Không ghi đè dữ liệu đầy đủ bằng partial, không chắp dữ liệu cũ vào dữ liệu partial để báo đủ.
-- Với tour mới chưa có complete snapshot, full vẫn có dòng thông tin định danh/card và trạng thái `pending`, đánh dấu rõ chưa đủ dữ liệu. Nếu có partial snapshot thì xuất phần đã quan sát được với nhãn partial; không giả lập dữ liệu bị thiếu. Tour mới chỉ có sự kiện `new` sau lần complete đầu tiên; lỗi/partial nằm trong nhật ký.
-- Kiểm tra thành công, dù hash không đổi, cập nhật `last_successful_check_at` bằng `crawl_runs.finished_at`; **không** dùng `parsed_at`, thời điểm replay, export hoặc discovery để kéo dài 7 ngày.
-- Lựa chọn crawl: chưa có complete baseline; `requires_refresh`; tour unavailable nhưng hiện được liệt kê; hoặc `now >= last_successful_check_at + recheck_days`. Failed/partial không tiến watermark, được thử lại ở batch tiếp theo nếu còn trong listing. Tour unavailable không còn listed không bị tải chi tiết mỗi ngày.
-- HTTP 404/410 chỉ được kết luận từ response navigation chính đã staging của tour được chọn, không từ ảnh, robots, AJAX lịch hay exception string. Lưu reason, thời điểm và run/raw evidence; không tiến watermark thành công.
-- Absence reconciliation chạy **sau** discovery đầy đủ và xử lý identity/alias. Chỉ đánh dấu các tour đã crawl thuộc registry trong nước; không đánh dấu mất tour từ toàn bộ `tour_snapshots` không liên quan.
-- Không suy ra unavailable từ hết lịch, không còn chỗ hoặc giá “Liên hệ”. Nếu vẫn là tour hợp lệ, xử lý bằng coverage hiện tại; trường hợp chưa được adapter hỗ trợ phải partial.
+### 2.2 Paths, symbols và dependencies có thật
 
-### B. Tận dụng lịch sử và identity
+| Existing path/symbol | Quan sát và ảnh hưởng khi move |
+| --- | --- |
+| `src/hanoitourist_crawler/cli.py:arguments/main`, `__main__.py` | CLI import workflow/export/Storage; retry/report có lazy imports trong `main`. Entry point trong pyproject là `hanoitourist_crawler.cli:main`; giữ nguyên. |
+| `incremental.py:selection_reason/crawl_domestic/recover_batches/_export` | Orchestration daily/recovery; `_export` lazy-import Excel. Giữ selection, lock, budget, checkpoints, freeze/export ordering. |
+| `attempts.py:complete_daily/complete_retry/complete_retry_stopped/complete_recovery` | Existing completion interface; daily parse/publication commit riêng, retry chung transaction hậu-network, recovery chỉ committed evidence, stopped không parse/publish. Không sửa body ngoài imports. |
+| `pipeline.py:parse_run/collect_run/capture_run/crawl/CrawlBusy` | Existing acquisition/replay seam; lazy-import diagnostics trong parse. Root `PARSER_VERSION` phải tiếp tục lấy từ package root. |
+| `retry.py:DiagnosticCollector/select_targets/retry_domestic/retry_report`, `scheduler.py:schedule` | Scoped retry có collector subclass, instrumentation và report; scheduler gọi daily workflow. Chỉ sửa import paths, không chạy scheduler. |
+| `collector.py:Collector/RequestPacer/CaptureError`, `navigation.py:GuardedNavigation`, `discovery.py` | Collector dùng parser `inventory/merge_inventory/sources`; discovery dùng parser `_locator/evidence`. Giữ existing fixture adapters/guard policy. |
+| `parser.py:parse/inventory`, `normalize.py`, `validation.py:validate`, `fingerprint.py:fingerprint` | Parser phụ thuộc selectors; fingerprint dùng parser `_content_signature`. Không tách các helpers sang module mới hay thay extraction/validation. |
+| `storage.py:Storage.init_schema/persist_snapshot/apply_attempt/bind_identity/freeze_batch` | Owns SQL/identity/accepted policy. `init_schema` đọc `files('hanoitourist_crawler').joinpath('sql', name)`. Có lazy imports fingerprint và scope cần sửa. Chỉ đổi resource package và imports. |
+| `excel.py:export_excel/export_batch_excel`, `export.py:export_run`, `diagnostics.py:phase/classify/write_report` | Reporting dùng model/shared errors; diagnostics còn dùng ở giữa workflow, không phải runtime stage cuối. Không tối ưu hydrate/workbook/coverage trong task này. |
+| `tests/conftest.py` | `FIXTURES = Path(__file__).parent / 'fixtures'`; Storage UUID schemas từ `TEST_DATABASE_URL`; Chromium và HTTP loopback fixtures. Giữ fixture logic và đường dẫn fixtures. |
+| `tests/test_attempts.py`, `test_pipeline.py`, `test_retry.py` | Import helper `collector` từ `test_incremental`; test_incremental dùng helpers từ `test_discovery/test_collector`. Discovery/navigation cũng dùng test_collector. Các bare imports sẽ gãy nếu chỉ mv files. |
+| `tests/test_parser.py`, `test_collector.py`, `test_discovery.py`, `test_incremental.py`, `test_navigation.py` | Có `from conftest import FIXTURES`; cần qualified tests package import khi thêm package markers. |
+| `pyproject.toml` | Setuptools `where = ["src"]`; package-data hiện root `sql/*.sql`; pytest testpaths/markers, không lint/typecheck runner riêng. |
+| `Dockerfile`, `compose.yaml` | Dockerfile COPY toàn src và install package, CLI không hardcode moved module path. Không cần sửa hoặc build/deploy; Compose/config giữ nguyên. |
 
-- Seed baseline từ dữ liệu hiện có cho URL tour Phú Quốc đang được repo hỗ trợ và cho các URL/identity được discovery xác nhận thuộc danh mục trong nước. Không tự nhập tất cả snapshot của host vào scope này.
-- Chọn complete snapshot của **lần capture thành công mới nhất**, rồi snapshot parse mới nhất của chính run đó, tie-break bằng ID. Run gần đây partial/failed không làm mất complete baseline cũ. Một replay hôm nay của capture cũ không được coi là lần kiểm tra hôm nay.
-- Nếu lịch sử chỉ có partial thì giữ để xem, nhưng tour vẫn cần lấy lại ngay. Nếu thiếu `finished_at` đáng tin cậy, giữ nội dung baseline nhưng để watermark chưa xác định và kiểm tra ngay.
-- Seed idempotent khi một entity được đưa vào catalogue lần đầu, không phát sinh delta `new` cho dữ liệu cũ và không thay raw/snapshot lịch sử. Không chạy lại bootstrap theo cách reset watermark/state ở mỗi batch.
-- URL discovery là key ban đầu; `source_tour_id` xác minh từ chi tiết là identity ổn định. Lưu alias URL để canonical/trailing slash/slug redirect không tạo tour trùng. Source ID thay đổi trên URL đã có không được âm thầm ghi đè identity cũ: ghi lỗi/partial để xem lại.
-- Khi URL mới xác minh được source ID của tour đã có, transaction chuyển alias về entity cũ và hợp nhất candidate pending; phân loại theo baseline entity cũ, không báo tour mới giả. Giữ entity pending đã có lịch sử bằng `superseded_by_id`, không xóa dữ liệu lịch sử.
+**Cross-group dependencies là có thật:** acquisition sử dụng processing helpers; processing parser sử dụng acquisition selectors. Đây không phải layer diagram một chiều. Không nhân dịp di chuyển để đổi seam, inject interfaces giả định hoặc tạo adapters/framework mới. Giữ depth của existing modules; thay đổi này cải thiện locality khi đọc, không tự nhận là deepening/refactor logic.
 
-### C. Hash và delta
+### 2.3 Checks thực sự đã chạy trong ARCHITECT
 
-- Tạo fingerprint có version riêng (`v1`) trên projection nội dung nghiệp vụ, không hash raw HTML toàn trang hay serialized snapshot nguyên xi.
-- Bao gồm title, URL nguồn chuẩn, source ID, duration/origin, giá/chỗ raw và normalized, review/sidebar, mọi section/day variant (text + signature HTML), media/link, mọi departure observation và price cell (kể cả nhãn/rowspan/colspan/null/zero).
-- Loại UUID run/snapshot/children/raw, provenance, thời điểm capture/parse/observed, state key giao diện, coverage, warning và parser/collector version. Canonical-sort collections; loại bản sao observation chỉ khác metadata kỹ thuật nhưng giữ các giá trị nghiệp vụ xung đột.
-- Tái sử dụng nguyên tắc `_content_signature` của parser để bỏ đúng trạng thái accordion/lazy-image đã được xác minh. Không strip mọi `data-*`, mọi URL query/fragment, HTML hoặc nội dung chỉ để làm hash ổn định. Nếu phát hiện markup kỹ thuật mới gây hash nhiễu, chỉ whitelist sau khi có fixture regression.
-- Delta là dữ liệu đầy đủ mới nhất của mỗi tour thay đổi, không phải diff từng ô. `change_kinds` có thể gồm `new`, `updated`, `unavailable`, `reactivated`; một tour chỉ xuất một lần trong delta của batch.
-- Dữ liệu cũ unchanged/seed/skipped không vào delta. Một lần lỗi làm thay warning/attempt metadata cũng không phải cập nhật dữ liệu tour. Đổi availability phải vào delta dù nội dung không đổi hoặc chỉ còn snapshot cũ.
+- AST parse **24 source + 22 tests/conftest Python files**: đạt.
+- Đọc normal installed package qua distribution metadata: **26 Python/SQL file bytes** hiện khớp source. Chưa test wheel layout mới.
+- `git diff --check`: sạch trước khi viết PLAN.
+- `uv 0.12.1`, build CLI hỗ trợ wheel/out-dir; local Docker image có `postgres:17-alpine`. Đây chỉ là prerequisite discovery, **chưa chứng minh DB/Chromium/build-cache readiness**.
+- Không chạy pytest/browser/DB/schema initialization, không build/install, không network/business DB/scheduler. **582 passed** trong README là kết quả lịch sử, không phải verification của việc move sắp tới.
 
-### D. Batch, export và scheduler
+## 3. Thiết kế đích và trade-offs
 
-- Batch giữ liên kết discovery run + từng detail run, outcome/counters/errors và snapshot refs trước/sau. Freeze selection full/delta ở cuối xử lý trong DB; export lại batch cũ **không** query “latest catalogue hiện tại”.
-- Hai workbook batch dùng sáu sheet nghiệp vụ hiện có và thêm sheet **Nhật ký tải** cho status/errors/counts. Entry point export một tour giữ nguyên sáu sheet.
-- Full bao gồm skipped/cached/unavailable với dữ liệu cũ và thời điểm kiểm tra thật. Delta rỗng vẫn có workbook có headers và batch status; discovery lỗi không được trình bày như “không có thay đổi, thành công”.
-- Một PostgreSQL **session advisory lock** cho các lệnh có mạng (`crawl`, `crawl-domestic`, lịch tự động), cùng namespace DB/schema. Lock sống qua raw commits nhưng không giữ SQL transaction trong thời gian browser chạy. Parse/export offline không cần lock này.
-- Scheduler tick mặc định 60 giây; tính mốc lịch đến hạn bằng giờ địa phương có ZoneInfo, lưu mốc UTC trong DB. Sau khi lấy lock phải kiểm tra lại scheduler state trước khi chạy. Một batch terminal (complete/partial/failed) tính là đã xử lý mốc, tránh retry nóng cùng ngày; failed tours vẫn due vào lượt sau. Busy không consume mốc.
-- First start chưa có scheduler state: chạy một lượt cho mốc gần nhất đã đến hạn. Khi bỏ lỡ nhiều ngày: không enumerate/crawl từng ngày, chạy một batch cho mốc gần nhất và tiến `last_handled_slot` tới mốc đó.
-- Máy ngủ trong lúc đang crawl: khi thức dậy vẫn kiểm tra deadline/lock trước khi tiếp tục. Docker/service bị dừng hẳn: lock được DB giải phóng; lần tiếp theo dưới lock phục hồi batch `running` bỏ dở thành partial, freeze/export các thay đổi đã commit và giữ raw/attempt history. Với scheduled batch cũ đã xử lý một phần, ghi nhận mốc cũ terminal; chỉ chạy catch-up mới nếu có mốc mới hơn đến hạn. Tour chưa xử lý không bị tiến watermark.
-- Export failure không rollback catalogue/snapshot và không crawl lại chỉ để sửa file; batch có export status riêng và lệnh export offline để khôi phục. Không tự thực hiện migration khi mỗi tick/crawl chạy.
-
-## Các bước triển khai có thứ tự
-
-### 1. Khởi tạo Git và commit baseline trước mọi implementation
-
-**Files:** `.git/` **mới** (metadata Git local, gồm `.git/info/exclude`); stage các file hiện tại `PLAN.md`, `README.md`, `pyproject.toml`, `compose.yaml`, `.env.example`, `.gitignore`, `src/hanoitourist_crawler/` và `tests/`. Không sửa source/config/tests trước commit này.
-
-**Thay đổi:** kiểm tra lại repo chưa có Git, rồi `git init` tại root dự án. Nếu repository đã được tạo trong lúc chờ IMPLEMENT thì không re-init/reset/overwrite; kiểm tra trạng thái và tạo baseline trên repository đó theo các thay đổi hiện có. Kiểm tra Git author identity bằng cấu hình có sẵn; nếu thiếu thì hỏi người dùng name/email, không tự bịa identity hoặc sửa global config. Exclude `.codegraph/` generated bằng `.git/info/exclude` local; `.gitignore` hiện có tiếp tục loại `.env`, `.venv`, exports/build/caches/egg-info.
-
-Stage bằng danh sách đường dẫn rõ ràng, **không `git add .` mù quáng**. Review staged paths và diff để chắc không có secrets/artifacts ngoài ý muốn. Commit message đề xuất: `chore: snapshot existing crawler before incremental loading`. Ghi lại baseline commit SHA; không add remote/push, không amend history, không dùng reset/clean để làm working tree sạch. Sau commit mới bắt đầu thêm regressions/source changes ở các bước 2–11.
-
-**Kiểm tra:** `git status`, staged file list/diff, commit thành công và `git show --stat`/SHA cho baseline. Không cần chạy tests hoặc reinstall trước snapshot. Baseline phải chứa phiên bản crawler hiện tại cùng PLAN cuối cùng này, không chứa implementation mới.
-
-**Vì sao:** người dùng yêu cầu lưu trạng thái hiện tại trước khi triển khai để review diff và có điểm quay lại.
-
-**Rủi ro:** commit `.env`/exports chứa dữ liệu hoặc thiếu Git identity; repository xuất hiện trong lúc chờ; hiểu nhầm Git là backup DB. Git chỉ lưu mã/config mẫu/tests/docs, **không backup PostgreSQL hay runtime exports** và không thay/chụp dữ liệu DB trong bước này.
-
-### 2. Xác minh adapter listing và khóa regression scope
-
-**Files:**
-- `src/hanoitourist_crawler/selectors.py`
-- `tests/fixtures/domestic_listing_page_1.html` **mới**
-- `tests/fixtures/domestic_listing_page_2.html` **mới**
-- `tests/fixtures/dynamic_domestic_listing.html` **mới**
-- `tests/test_discovery.py` **mới**
-- `tests/test_parser.py`
-
-**Thay đổi:** sau Git baseline, khảo sát read-only robots, main listing, card/title link, empty-result, pager cuối và request của danh mục. Ghi selector/view identity đã xác minh; chỉ fixture mới được thêm, không sửa fixture tour lịch sử. Tạo fixtures tối giản phản ánh markup đã xác minh, kèm dynamic mock để kiểm tra render/pagination. Không crawl toàn bộ chi tiết chỉ để khảo sát danh mục. Nếu site chặn truy cập hoặc không chứng minh được pagination terminal thì adapter fail closed/partial và báo phần live chưa kiểm chứng.
-
-**Tests:** 2 trang có URL trùng; header/menu/footer/tour gợi ý/tour nước ngoài không nhập inventory; card thiếu hoặc sai href vẫn được ghi nhận unresolved thay vì biến mất; pager/total count không khớp gây partial; tour thứ hai có node ID/URL/lịch khác vẫn dùng parser/validator chung và giữ toàn bộ giá/nội dung, không hardcode ID 8140.
-
-**Vì sao:** coverage danh mục là điều kiện an toàn cho việc đánh dấu unavailable; repo chưa có bằng chứng về markup này.
-
-**Rủi ro:** HTTP 200 nhưng là CAPTCHA, listing hydrate muộn, nhiều pager ngoài scope, hoặc AJAX khác lịch tour. Không dùng CSS guessed để tuyên bố complete; không tự whitelist `view_args=137` từ test cũ.
-
-### 3. Thêm contracts, migration additive và repository catalogue
-
-**Files:**
-- `src/hanoitourist_crawler/models.py`
-- `src/hanoitourist_crawler/storage.py`
-- `src/hanoitourist_crawler/sql/002_incremental.sql` **mới**
-- `tests/test_storage.py`
-- `tests/test_catalogue_storage.py` **mới**
-- `tests/conftest.py`
-
-**Thay đổi:** thêm dataclasses nhỏ cho discovered tour/result, tour state và batch result; giữ models snapshot/raw hiện tại. Migration tạo năm bảng:
-
-1. `domestic_batches`: ID, origin/manual-scheduled, scheduled_for, discovery_run_id, started/finished, status, discovery_complete, counts/errors JSONB, stage, export_status/export_manifest/export_errors. Không ghi lỗi chứa credentials.
-2. `domestic_tours`: ID, source_tour_id nullable, canonical_url, listing_title, is_listed, availability/reason/changed_at, current_snapshot_id, latest_attempt_run_id, last_attempt_at, last_successful_check_at, last_seen_batch_id, requires_refresh, fingerprint/version, superseded_by_id nullable. Unique source ID cho entity chưa superseded; indexes phục vụ due/availability.
-3. `domestic_tour_urls`: normalized URL key duy nhất, tour_id FK, first_seen_at, last_seen_batch_id; alias chỉ bind sau bằng chứng discovery/chi tiết hợp lệ.
-4. `domestic_batch_tours`: `(batch_id,tour_id)` PK, discovery/selection reason, attempt run refs, outcome/errors, previous/result/display snapshot refs, previous/result availability, hashes, change_kinds. Tạo row cho cả tour skipped/unavailable khi freeze để tái xuất full đúng lịch sử. Hợp nhất alias không làm mất các attempt refs.
-5. `scheduler_state`: job_key PK, last_handled_slot UTC và updated_at; không suy scheduler watermark từ file hoặc thời gian parse.
-
-`init_schema` chạy các script packaged theo thứ tự `001`, `002` trong transaction idempotent, không sửa `001` hoặc bảng lịch sử. Preflight incremental kiểm tra bảng mới và báo cần `db init`; preflight legacy giữ được chức năng cũ. Thêm repository methods cho seed/query latest history by capture time, upsert aliases, due selection, apply outcome/event atomic, reconcile absence, freeze/get batch, recover abandoned batches, schedule slot và session lock. Snapshot children vẫn do `persist_snapshot` hiện có quản lý; thêm lookup theo snapshot ID để đọc refs cố định, không thay semantics `get_snapshot(run_id, version)`.
-
-**Tests:** apply migration vào schema chỉ có 001 và dữ liệu cũ; init lặp lại; raw/snapshot IDs/body/hash/time không đổi; JSONB/null/Decimal/timestamps round-trip; bootstrap capture-vs-replay ordering; alias/source-ID uniqueness; rollback chỉ state update, không mất staging; hai connections cùng schema tranh lock, unlock sau close; freeze refs vẫn giữ nguyên khi catalogue cập nhật ở batch sau.
-
-**Vì sao:** cần persistent watermark, catalogue và audit batch thay vì suy trạng thái từ files export hoặc một JSON blob toàn bộ ứng dụng.
-
-**Rủi ro:** migrations/foreign keys tạo vòng phụ thuộc, session lock reentrant không cân bằng, alias merge làm mất delta hoặc reset watermark. Tạo batches trước tours/aliases/results, dùng SQL parameterized và identifiers an toàn; giữ snapshot history append-only.
-
-### 4. Cấu hình scope, lịch, budget và URL safety
-
-**Files:**
-- `src/hanoitourist_crawler/config.py`
-- `src/hanoitourist_crawler/scope.py` **mới**
-- `.env.example`
-- `tests/test_config.py`
-- `tests/test_scope.py` **mới**
-
-**Thay đổi:** giữ URL default và lệnh crawl một tour cũ. Thêm fields/env:
-
-- `DOMESTIC_LISTING_URL=https://hanoitourist.vn/tour-trong-nuoc` — scope root cố định, không thành arbitrary website crawler.
-- `RECHECK_DAYS=7`.
-- `DISCOVERY_TIMEOUT=300`, `MAX_LISTING_PAGES=50` — riêng với giới hạn lịch khởi hành hiện tại.
-- `BATCH_TIMEOUT=21600` — budget mặc định 6 giờ, cho phép tăng; hết budget đánh dấu phần chưa làm là pending/partial, không truncate rồi báo complete.
-- `SCHEDULE_TIME=00:00`, `SCHEDULE_TIMEZONE=Asia/Ho_Chi_Minh`, `SCHEDULER_POLL_INTERVAL=60`.
-- `SCHEDULER_DATABASE_URL` dành cho Compose nội bộ, tách `DATABASE_URL` host đang dùng localhost.
-
-Giữ CLI > env > default. Validate finite/positive budgets, recheck days, định dạng HH:MM, ZoneInfo và user-agent. Manual config vẫn giữ scope tour cũ; batch chỉ tạo config per-tour bằng `dataclasses.replace` sau khi discovery/scope validator chấp nhận link, không nới `TOUR_URL` thành mọi URL cùng host.
-
-Scope helper chuẩn hóa HTTPS đúng hostname (không userinfo/port lạ), relative links và trailing slash; bỏ fragment/tracking params đã whitelist của card URL, không bỏ query nội dung tùy ý. Link lạ/unrecognized ghi unresolved. Pager chỉ nhận path/query thuộc listing/view đã xác minh, không theo category menu tùy ý hoặc booking/admin/user/comment. Query/fragment của links trong nội dung tour vẫn được giữ như hiện tại.
-
-**Tests:** overrides/defaults; invalid HH:MM/timezone/NaN/0; host giả, scheme-relative external, credentials trong URL, booking và pager ngoài scope; canonical/trailing slash/card tracking; unknown query không được âm thầm merge; detail URL hợp lệ từ listing tạo config được dùng mà manual scope cũ vẫn nguyên.
-
-**Vì sao:** phân tách budget từng tour với toàn batch và giới hạn authority của discovery, đồng thời cho người dùng đổi giờ chạy sau này.
-
-**Rủi ro:** nới URL validator quá rộng, hostname suffix check, timezone thiếu trên image hoặc budget 300 giây vô tình áp cho tất cả tour. Không log DSN; không hardcode lịch vào source.
-
-### 5. Triển khai discovery có raw staging và completeness độc lập
-
-**Files:**
-- `src/hanoitourist_crawler/discovery.py` **mới**
-- `src/hanoitourist_crawler/selectors.py`
-- `src/hanoitourist_crawler/collector.py`
-- `tests/test_discovery.py`
-- `tests/test_collector.py`
-
-**Thay đổi:** `discover_domestic(config, storage, discovery_run_id, ...)` dùng browser read-only, checkpoint source/DOM và AJAX nếu adapter đã xác minh. Dùng `crawl_runs` + `RawDocument` hiện có với role `listing`/`listing_state`; listing manifest riêng, **không** gọi tour parser cho discovery run. Stage raw trước parse listing/inventory; state/sequence/body/budget không bị truncate.
-
-Enumerate card rows trong main listing trước khi lọc identity, ghi URL/title/source ID nullable/provenance và unresolved reason. Traverse chỉ pager của scope; lưu visited URL/state, page inventory, next/terminal evidence và total count nếu site cung cấp. Complete chỉ khi navigation/render/cards đều hợp lệ, không thiếu unresolved cards, pager terminal được xác minh và không còn actions pending. Empty danh mục phải có explicit marker trong đúng scope. Partial discovery có thể cung cấp positive links hợp lệ để xử lý tiếp, nhưng tuyệt đối không authorize absence reconciliation.
-
-Giữ robots fail-closed, rate limit, finite retries/Retry-After và không bypass access gates. Network policy listing độc lập và hẹp: chỉ listing/pager và đúng read-only AJAX đã xác minh; không dùng node-ID lịch tour làm whitelist AJAX danh mục. Tạo `RequestPacer` nhỏ trong collector để chia sẻ khoảng cách request dữ liệu giữa discovery và các detail collector trong cùng batch; mỗi browser vẫn tuần tự, không thêm concurrency/browser pool. Không làm lại toàn bộ network stack của collector.
-
-**Tests:** HTTP/DOM dynamic listing, hai pages/duplicates/terminal, repeated pager/state, cap/timeout/raw limit, source-vs-DOM coverage, explicit zero vs selector missing; robots unavailable/disallow; 403/CAPTCHA/429/5xx; unsafe POST và AJAX sai view_args; external/menu/booking không được navigate; valid links còn dùng được khi một trang sau lỗi nhưng result partial; pacer không reset giữa tour.
-
-**Vì sao:** không có discovery đầy đủ thì không thể kết luận tour đã bị gỡ. Dữ liệu listing cũng cần bằng chứng raw để chẩn đoán lỗi adapter.
-
-**Rủi ro:** discovery và parser cùng bỏ card, HTML-only fallback làm false complete, hoặc reuse whitelist làm mở POST tùy ý. Unrecognized controls fail conservatively; không click search/form/filter chưa xác minh.
-
-### 6. Phát hiện navigation outcome và fingerprint nội dung
-
-**Files:**
-- `src/hanoitourist_crawler/collector.py`
-- `src/hanoitourist_crawler/fingerprint.py` **mới**
-- `tests/test_collector.py`
-- `tests/test_fingerprint.py` **mới**
-- `tests/test_parser.py`
-
-**Thay đổi:** collector ghi navigation attempts/final URL/status/raw ID vào manifest để batch phân loại lỗi bằng dữ liệu có cấu trúc. Hỗ trợ redirect chi tiết có giới hạn từ URL đã chọn tới URL tour HTTPS cùng host, chặn đường booking/admin/user/category bất hợp lệ và kiểm tra source identity sau parse. Không cho redirect tùy ý trở thành link data được phép. Resource/AJAX lỗi không thay terminal navigation outcome; staging 404/410 không gọi parse tour như có dữ liệu.
-
-`fingerprint(snapshot)` tạo projection/version/hash theo hợp đồng C, dùng Decimal/timestamp canonical chính xác và content signature của parser. Không đổi stored HTML hoặc thuật toán trích xuất. Tất cả comparisons có ordering ổn định sau DB round-trip.
-
-**Tests:** navigation 404/410 vs AJAX/ảnh 404, retry cuối cùng, 403/429/timeout không unavailable, unsafe/cross-host redirect, node identity mismatch; metadata UUID/provenance/time/parser-version/list ordering đổi vẫn hash bằng nhau; title/giá/chỗ/ma trận giá/day text/link đích/query/fragment/ảnh/rowspan/null-zero đổi làm hash khác; variants/xung đột không bị dedup; source và UI state đã whitelist không tạo delta giả; hash trước/sau DB round-trip bằng nhau.
-
-**Vì sao:** tránh đánh dấu unavailable bằng lỗi không liên quan và tránh delta giả mỗi lần UUID/time thay đổi.
-
-**Rủi ro:** fingerprint omit field gây false unchanged, hoặc hashing volatile UI tạo update giả. Ưu tiên giữ ngữ nghĩa, kiểm thử từng field nhóm và version hash độc lập với parser.
-
-### 7. Orchestrator incremental, tái dùng baseline và transaction checkpoints
-
-**Files:**
-- `src/hanoitourist_crawler/incremental.py` **mới**
-- `src/hanoitourist_crawler/pipeline.py`
-- `src/hanoitourist_crawler/storage.py`
-- `tests/test_incremental.py` **mới**
-- `tests/test_pipeline.py`
-- `tests/test_catalogue_storage.py`
-
-**Thay đổi:** thêm `crawl_domestic(config, storage, ..., scheduled_for=None)` với collector/discovery/clock injection để test offline. Trình tự:
-
-1. Preflight, lấy session lock; scheduled caller kiểm tra lại mốc đã xử lý. Busy trả kết quả skipped/busy, không tạo batch và không gọi browser.
-2. Dưới lock phục hồi batch running bỏ dở; tạo batch mới và discovery run. Seed baseline lịch sử idempotent cho scope đã chứng minh.
-3. Persist discovery positive inventory, bind URL aliases, ghi danh sách lựa chọn và lý do. Không đánh dấu available chỉ từ card.
-4. Với từng selected tour, cap budget theo phần còn lại, tạo detail run và checkpoint run ref vào batch **trước** collect. Dùng `crawl/parse_run` hiện có để giữ staging/snapshot/replay; không tạo pipeline parser thứ hai hoặc scrape rút gọn.
-5. Với complete snapshot, validate expected identity, hash và publish accepted state + batch outcome/change_kinds trong một transaction ngắn. Unchanged vẫn cập nhật watermark và snapshot kiểm chứng, nhưng không tạo delta. Partial/failed giữ accepted snapshot và watermark cũ; record latest attempt và retry-needed. 404/410 update availability bằng evidence, không coi là complete parse.
-6. Resolve identity/aliases trước reconciliation; nếu discovery complete, đánh dấu tour đã crawl không có trong discovered entity set là unavailable. Repeated unavailable không phát sinh event lặp.
-7. Freeze batch rows cho full/delta từ state hiện tại bằng một transaction, gồm tour không chọn và unavailable. Finish crawl status/counters; export riêng ở bước 8.
-
-Legacy `crawl` dùng cùng lock cho toàn capture/parse, nhưng không thay đường dẫn/JSON/exit contract. Tách helper nội bộ nếu cần tránh acquire lock hai lần khi batch gọi pipeline cho từng tour; lock phải có một owner và release cân bằng ở finally. Không giữ SQL transaction khi browser chờ mạng. `parse` replay không tiến registry watermark hoặc scheduler state.
-
-Abandoned recovery dưới lock: terminalize running detail run/batch có cấu trúc lỗi, giữ mọi committed raw/snapshot; nếu snapshot complete đã persist nhưng state publication chưa commit thì apply outcome idempotently từ linked run/evidence, không crawl lại. Freeze các kết quả đã có, các candidates chưa làm giữ pending; xuất batch partial này để không làm mất delta đã commit trước crash. Không tái claim slot hoặc overwrite event cùng batch/tour.
-
-**Tests:** baseline complete mới nhất theo capture time và baseline partial; first batch tận dụng Phú Quốc thay vì crawl lại nếu chưa đến hạn; chính xác biên 7 ngày UTC, 6 ngày không fetch; tour mới/failed/reappeared lấy ngay; unchanged vs price/content changed; disappearance complete/partial/empty; unavailable reappear thành công/thất bại; lỗi một tour không chặn các tour sau; alias canonical/slug cùng source ID không new giả; new partial hiển thị pending; budget/interruption/recovery đúng checkpoints; hai tiến trình manual/scheduled không chồng; không mất delta sau crash giữa persist snapshot/apply state/export.
-
-**Vì sao:** đây là state machine incremental chính, nối các contracts hiện có mà không thay semantics parser và lịch sử.
-
-**Rủi ro:** crash giữa capture và registry update, retries kéo watermark sai, seed báo mọi tour mới giả hoặc absence chạy quá sớm. Các điểm publish/reconcile/freeze phải idempotent và có PostgreSQL integration tests, không chỉ MemoryStorage happy path.
-
-### 8. Export delta/full XLSX cố định theo batch, atomic và offline
-
-**Files:**
-- `src/hanoitourist_crawler/excel.py`
-- `src/hanoitourist_crawler/storage.py`
-- `tests/test_excel.py`
-- `tests/test_export.py`
-
-**Thay đổi:** factor row-building tối thiểu để workbook nhiều tour dùng lại formatting/safety/content rules của exporter một tour. Giữ `export_excel(storage, run_id, output_dir, version=None)` và output lịch sử nguyên trạng. Thêm `export_batch_excel(storage, batch_id, output_dir)` đọc **frozen batch rows + exact snapshot IDs**, không crawl/parse/update current data.
-
-Hai outputs: `exports/domestic/<batch-id>/delta.xlsx`, `full.xlsx`. Sáu sheet nghiệp vụ giữ full content trong một ô/day/variant, shared price không nhân, raw/normalized money, IDs liên kết và không hyperlink booking; thêm `Nhật ký tải` cho batch metadata/outcomes/errors. Bản batch thêm các cột rõ nghĩa: availability/reason, listed, data quality, change kind, last successful check, attempt error và stable catalogue ID. Không dùng chung chữ “Trạng thái” cho coverage và availability. Tour chưa đủ snapshot vẫn có summary, các child rows chỉ từ snapshot thật; dữ liệu cũ chưa kiểm tra lại phải thể hiện timestamp cũ.
-
-Build cả hai workbook trong temporary sibling directory, fsync, rồi publish cả directory khi cả hai đã thành công. Chỉ sau publish mới cập nhật export_manifest/status trong DB; manifest lưu batch/frozen-selection/export-schema version và checksums để nhận diện bundle đã publish nếu crash trước DB acknowledgment. Directory thành công là immutable; export lại cùng frozen selection/schema vào cùng destination trả bundle hiện có sau kiểm tra, không replace directory nonempty. Nếu đổi destination thì tạo bundle mới. Bundle khác schema/hỏng phải báo lỗi và hướng dẫn output-dir khác, không âm thầm overwrite lịch sử.
-
-Thất bại giữ current registry/raw/snapshot và bundle cũ, cleanup temporary, ghi export failure an toàn. Published bundle chưa được DB acknowledge có thể được xác nhận lại offline. Không rollback business state và không recrawl website vì lỗi Excel.
-
-**Tests:** multi-tour đầy đủ, delta chỉ changed và full gồm skipped/unavailable; baseline/cached timestamps đúng; empty delta/failed-discovery được annotate; batch cũ re-export sau batch mới không đổi nội dung/ref; mixed parser versions của các tour được ghi riêng, không nhầm một version toàn workbook; seven batch sheets vs six legacy sheets; pending/partial giữ dữ liệu thật; formula/precision/null/zero/rowspan/variants/link/32767 chars/XML/row limits; lỗi workbook thứ hai không publish bundle; fsync/rename/DB acknowledgment failure recovery; DB/export không đổi raw/snapshot/current registry.
-
-**Vì sao:** full phải giữ dữ liệu tour không crawl trong lượt này; delta phải xem được toàn bộ thông tin tour thay đổi và có thể tái xuất đúng batch lịch sử.
-
-**Rủi ro:** query latest khi re-export làm historical full thay đổi, hai rename file riêng không atomic như một bundle, workbook lớn vượt Excel limits. Báo lỗi rõ, không truncate/split nội dung tự động. Không redesign giao diện workbook ngoài các cột/nhật ký cần thiết.
-
-### 9. CLI và scheduler bền vững với catch-up
-
-**Files:**
-- `src/hanoitourist_crawler/cli.py`
-- `src/hanoitourist_crawler/scheduler.py` **mới**
-- `src/hanoitourist_crawler/incremental.py`
-- `tests/test_cli.py`
-- `tests/test_scheduler.py` **mới**
-
-**Thay đổi:** thêm lệnh:
+### 3.1 Source: năm nhóm trách nhiệm
 
 ```text
-hanoitourist crawl-domestic [--headed] [--output-dir DIR]
-hanoitourist export-batch --batch-id UUID [--output-dir DIR]
-hanoitourist schedule
+src/hanoitourist_crawler/
+├── __init__.py                 # versions, giữ nguyên
+├── __main__.py                 # python -m, giữ nguyên
+├── cli.py                      # điểm vào, chỉ sửa imports
+├── config.py                   # cấu hình dùng chung, giữ nguyên
+├── models.py                   # data structures, giữ nguyên
+├── errors.py                   # error formats dùng chung, giữ nguyên
+├── workflows/
+│   ├── __init__.py             # NEW marker, không re-export
+│   ├── incremental.py
+│   ├── retry.py
+│   ├── attempts.py
+│   ├── pipeline.py
+│   └── scheduler.py
+├── acquisition/
+│   ├── __init__.py             # NEW marker
+│   ├── discovery.py
+│   ├── collector.py
+│   ├── navigation.py
+│   ├── scope.py
+│   └── selectors.py
+├── processing/
+│   ├── __init__.py             # NEW marker
+│   ├── parser.py
+│   ├── normalize.py
+│   ├── validation.py
+│   └── fingerprint.py
+├── persistence/
+│   ├── __init__.py             # NEW marker
+│   ├── storage.py
+│   └── sql/
+│       ├── 001_initial.sql
+│       └── 002_incremental.sql
+└── reporting/
+    ├── __init__.py             # NEW marker
+    ├── excel.py
+    ├── export.py
+    └── diagnostics.py
 ```
 
-`crawl-domestic` chạy batch và xuất cả hai XLSX; `export-batch` chỉ đọc batch frozen; `schedule` gọi cùng orchestrator/exporter, không shell cron hay subprocess CLI để tránh lệch behavior. Lệnh `crawl`, `parse`, `export --format json/xlsx`, `db init` cũ giữ flags/defaults.
+Không đổi tên file/function/class để giảm review noise. Các `__init__.py` mới empty hoặc docstring-only, không eager import/re-export modules khác. Nhờ vậy import một group không tự khởi tạo workflow/connection và không tạo import cycles mới. Không cần marker cho `sql/`: đây là data directory thuộc persistence package.
 
-Scheduler loop có clock/sleeper/storage factory injection, mở lại DB connection sau sleep/restart/mất kết nối; kiểm tra latest due slot ở mỗi tick thay vì tin timer trong RAM. Cập nhật `last_handled_slot` khi invocation terminal, kể cả partial/failed/export failure đã ghi vào batch để không retry nóng. Busy đợi tick sau; config/DB errors log an toàn với backoff giới hạn, không consume slot khi chưa tạo/xử lý batch. SIGTERM/KeyboardInterrupt dừng gọn, finally giải phóng connection/lock; không dùng credential/exception message tùy ý trong log.
+**Interface/path examples:** `hanoitourist_crawler.processing.parser.parse`, `hanoitourist_crawler.workflows.attempts.complete_retry`, `hanoitourist_crawler.persistence.storage.Storage`. Type signatures, defaults, exceptions, ordering và transaction contracts giữ nguyên. Root CLI/version/model/error imports không đổi.
 
-CLI in batch ID, discovery/crawl/export statuses, new/updated/unavailable/reactivated/unchanged/skipped/partial/failed counts và hai path. Exit 0 complete, 2 partial/busy, 1 failed/export/config/DB error, 130 interrupted. Log scheduler giữ outcome nhưng không thoát daemon chỉ vì một tour failed.
+Trong một group dùng relative sibling imports như repo đang làm; cross-group dùng `..processing`, `..acquisition`, `..reporting`, `..persistence`; shared/root version imports dùng `..models`, `..errors`, `from .. import PARSER_VERSION/COLLECTOR_VERSION`. Riêng root cli dùng `.workflows`, `.reporting`, `.persistence`. Giữ các lazy imports tại vị trí cũ. `attempts` vẫn import sibling `pipeline` như module object để monkeypatch seam hiện có không bị thay thành bound function khác.
 
-**Tests:** parsing/help không cần DB, legacy tests nguyên contract, exit codes và secret redaction; manual batch/export offline; timezone UTC-vs-VN midnight và boundary; first start/catch-up nhiều ngày một lượt; restart cùng ngày không trùng; máy sleep vượt mốc; time jump backward không rerun; giờ cấu hình đổi có documented nearest-slot policy; failed slot không loop nóng; busy không consume slot; DB disconnect/reopen; stopped mid-run recovery và partial/export failure không mất status.
+```text
+CLI → workflows (daily / scoped retry / legacy / recovery)
+          ├─ acquisition → raw checkpoints ───────────────┐
+          ├─ processing → validated snapshot             │
+          └─ completion → accepted publication           │
+                        persistence.Storage ←────────────┘
+          → frozen batch → reporting (JSON / Excel / diagnostics)
+```
 
-**Vì sao:** cron thuần bỏ lỡ khi máy ngủ và không đủ state cho catch-up; scheduler cần durable checkpoint và cùng concurrency guard với chạy thủ công.
+Đây là đường đọc/runtime overview, không phải lệnh buộc các group chỉ được gọi từ trái sang phải.
 
-**Rủi ro:** duplicate run do check slot trước lock, đánh dấu lịch đã chạy trước khi có batch, hoặc ngủ nhiều ngày kéo backlog vô hạn. UTC storage + local slot computation + recheck dưới lock là bắt buộc.
+### 3.2 SQL đi cùng persistence package
 
-### 10. Đóng gói Docker Compose cho máy cá nhân
+- Move cả hai SQL files **byte-for-byte** vào `persistence/sql/`.
+- `Storage.init_schema`: đổi duy nhất anchor thành `files('hanoitourist_crawler.persistence').joinpath('sql', name)`; giữ transaction, thứ tự 001/002 và cách execute/read_text hiện có.
+- `pyproject.toml`: thay package-data entry bằng **quoted** key `"hanoitourist_crawler.persistence" = ["sql/*.sql"]`; không để TOML diễn giải dotted key thành nested table. Giữ package discovery, scripts, versions, requirements, pytest settings.
+- Hash bất biến của 001: `46fe4ef63c4bd5455695971c6bab7e8ec07583f8ca99723a8bec758029c3ab72`.
+- Hash bất biến của 002: `9aec1839643e07de3d9e17992d9bcb9443d37db144920885a3b7243546be1a5c`.
+- Không schema migration/backfill; di chuyển file SQL không có nghĩa đổi SQL. Installed `Storage.init_schema` và CLI `db init` chỉ được chạy trên scratch trong verification.
 
-**Files:**
-- `Dockerfile` **mới**
-- `.dockerignore` **mới**
-- `compose.yaml`
-- `.env.example`
-- `README.md`
+### 3.3 Tests mirror groups, không viết lại helpers
 
-**Thay đổi:** image Python 3.13 slim, install package bình thường và `python -m playwright install --with-deps chromium` khi build để browser khớp Playwright được cài; có OS timezone data cho ZoneInfo. Không copy `.git`, `.env`, `.venv`, `.codegraph`, exports/build/caches vào image. Chạy headless, user không root nếu filesystem/browser hỗ trợ, bind-mounted exports có quyền ghi rõ ràng.
+```text
+tests/
+├── __init__.py                 # NEW marker
+├── conftest.py                 # shared fixtures, chỉ sửa imports
+├── fixtures/                   # giữ toàn bộ names/bytes
+├── test_cli.py                 # shared/root CLI tests + outside-repo smoke
+├── test_config.py              # giữ nguyên
+├── test_errors.py              # giữ nguyên
+├── test_package_layout.py      # NEW import/resource contract tests
+├── workflows/                 # NEW __init__.py
+│   └── test_{incremental,retry,attempts,pipeline,scheduler}.py
+├── acquisition/               # NEW __init__.py
+│   └── test_{discovery,collector,navigation,scope}.py
+├── processing/                # NEW __init__.py
+│   └── test_{parser,normalize,validation,fingerprint}.py
+├── persistence/               # NEW __init__.py
+│   └── test_{storage,catalogue_storage}.py
+└── reporting/                 # NEW __init__.py
+    └── test_{excel,export,diagnostics}.py
+```
 
-Thêm service `crawler` profile `scheduler`, command `hanoitourist schedule`, `init: true`, `shm_size` phù hợp Chromium, restart policy và dependency PostgreSQL healthy. Dùng PostgreSQL host `postgres:5432` trong container, không dùng `DATABASE_URL` localhost của host; `.env.example` có `SCHEDULER_DATABASE_URL` riêng và hướng dẫn percent-encode credentials khi cần. Mount `./exports` tới export directory; postgres_data hiện tại giữ nguyên. Profiles đảm bảo `docker compose up` cũ không tự mở browser/crawl khi người dùng chỉ muốn DB.
+Regular tests packages tránh phụ thuộc pytest tự thêm từng test directory vào sys.path:
 
-Hướng dẫn startup theo thứ tự: PostgreSQL healthy -> build crawler -> `run --rm crawler db init` -> `up -d crawler`. Schema migration là lệnh explicit; scheduler preflight không tự sửa schema. Đổi lịch bằng env rồi recreate service, không rebuild code. Máy ngủ/tắt vẫn không thể chạy đúng 00:00; khi Docker/service hoạt động lại mới có catch-up. Không hứa Docker Desktop tự mở sau reboot nếu người dùng chưa bật tùy chọn đó.
+- `from tests.workflows.test_incremental import collector`.
+- `from tests.acquisition.test_collector import MemoryStorage, mock_robots, FetchResponse, Request` theo đúng existing symbols mỗi call site đang dùng.
+- `from tests.acquisition.test_discovery import html_routes, URL`.
+- `from tests.conftest import FIXTURES`; pytest và helper imports resolve cùng qualified conftest, không tạo bản fixture module thứ hai.
 
-**Kiểm chứng:** `docker compose --profile scheduler config`, image build, container `--help`, init vào DB kiểm chứng, một batch mock/manual và restart service để xác nhận persistent slot/exports. Kiểm tra profile mặc định chỉ có postgres, host/container DSN đúng, logs không lộ DSN, Chromium/ZoneInfo/export permissions. Không `down -v`, không reset hoặc đổi project/port của DB hiện có.
+Trong từng slice, qualified imports chỉ trỏ tới **vị trí đã move lúc đó** (ví dụ `tests.test_incremental` trước slice workflows, sau đó mới `tests.workflows.test_incremental`). Không trỏ trước tới modules chưa tồn tại, không đổi PYTHONPATH/pytest import mode, không extract helper framework, không xóa/nới assertion hoặc markers để xanh.
 
-**Vì sao:** triển khai được trên máy cá nhân mà sau này chuyển server không phải đổi logic scheduler.
+### 3.4 Installed package là nguồn chạy tests
 
-**Rủi ro:** Chromium dependencies/architecture, timezone data, UID permissions, Docker Desktop resources, credentials host-vs-container và restart khi chưa migrate. Ghi rõ phần smoke chưa chạy nếu Docker không khả dụng.
+Giữ **normal install**, không editable/.pth workaround hay PYTHONPATH tới src. Ignored `build/lib`/egg-info hiện có có thể đưa flat modules cũ trở lại wheel. Vì vậy build từ **clean temporary project copy** chỉ có pyproject/README và current `src/hanoitourist_crawler`, không copy build/egg-info/pycache. Install wheel đó vào `.venv` bằng offline/no-deps/reinstall-package.
 
-### 11. Version, tài liệu, regression và nghiệm thu cuối
+Sau mỗi move slice so **exact file set + bytes** giữa source, wheel và installed package; không chỉ check version hay vài imports. Kết quả cuối dự kiến **29 Python + 2 SQL files**, tức 24 Python hiện có + 5 group markers, không có legacy flat modules hoặc root sql files. Không dọn ignored/user files trong repo để che packaging drift. Không sửa build config ngoài package-data cần thiết.
 
-**Files:**
-- `pyproject.toml`
-- `src/hanoitourist_crawler/__init__.py`
-- `README.md`
-- Tất cả tests mới/cập nhật đã liệt kê ở bước 2–9.
+### 3.5 README và domain docs
 
-**Thay đổi:** package lên `0.2.0`, mô tả domestic incremental + legacy CLI. `COLLECTOR_VERSION=0.2.0` vì navigation manifest/scope capture thay đổi; **giữ `PARSER_VERSION=0.1.4`** nếu không đổi logic extraction/validation. Fingerprint `v1` và schema export batch version riêng; nếu thực sự phải đổi parser để hỗ trợ markup tour mới thì review thay đổi đó và tăng parser version, không sửa snapshots version cũ.
+Thêm gần đầu README một mục “Bản đồ source và thứ tự đọc” gồm cây rút gọn và đường đọc:
 
-README giữ các nghiệm thu lịch sử và giới hạn an toàn; thay phần “duy nhất một tour/chưa có scheduler” bằng scope mới, mô tả baseline reuse/TTL/availability/quality/delta/full/batch refs. Hướng dẫn Python local, Compose profile, migration có dữ liệu cũ, lịch/catch-up/busy, đổi giờ, full-data constraints và re-export khi Excel lỗi. Ghi baseline Git SHA/kết quả implementation đúng sự thật; không ghi trước kết quả test/live chưa chạy.
+1. `cli.py` → `workflows/incremental.py` để hiểu lệnh và một đợt chạy.
+2. `acquisition/discovery.py` → `collector.py`/`navigation.py` để hiểu URL → raw.
+3. `processing/parser.py` → `validation.py` → `workflows/attempts.py` để hiểu raw → accepted decision.
+4. `persistence/storage.py`/`sql/` để hiểu ghi/đọc và policy.
+5. `reporting/excel.py`/`export.py`; riêng retry/recovery/scheduler theo workflow tương ứng.
 
-**Thứ tự verification trong IMPLEMENT:**
+Ghi rõ diagnostics dùng xuyên các bước và các nhóm không phải independent runtime stages. Bổ sung test tree/targeted commands hiện hành cần thiết và một current follow-up verification theo kết quả thật. **Không sửa counts/kết luận/đường dẫn evidence trong các báo cáo lịch sử** hoặc tách README thành docs/. Không có domain change, do đó **không sửa `GLOSSARY.md`, không tạo ADR**.
 
-1. Hoàn tất Git baseline ở bước 1 trước mọi edits, rồi chạy regression mới trên code cũ để xác nhận các case incremental/CLI chưa được hỗ trợ; không ép fixtures lịch sử đổi để xanh.
-2. Reinstall package thường sau source changes theo README (không `-e` trên môi trường macOS này), xác nhận runtime/source versions.
-3. Offline unit: `.venv/bin/python -m pytest -m 'not browser and not postgres' -q`.
-4. Browser mocks: `.venv/bin/python -m pytest -m browser -q` với Chromium thật, không website live trong pytest.
-5. Full suite với `TEST_DATABASE_URL` trên schema UUID cô lập; DB kiểm chứng README hiện tại dùng port 55432, không động vào dịch vụ khác ở 5432. Browser/Postgres skips phải báo rõ và không tính như đã nghiệm thu.
-6. Syntax/package/migration resource checks; run CLI từ ngoài repo để xác nhận migration và package data được đóng gói. Kiểm chứng Compose/Docker ở bước 10.
-7. Live smoke read-only danh mục trước, đối chiếu page/card count/terminal; rồi batch thật theo scope đã chốt, quan sát đầy đủ vài tour khác nhau. Nếu tour/template không được adapter hỗ trợ thì ghi partial và giữ dữ liệu cũ, không báo full giả. Không truy cập booking hoặc submit form.
-8. Batch thứ hai chưa đủ 7 ngày: listing vẫn được quét, complete tours unchanged không bị tải chi tiết lại, delta rỗng nếu site không đổi. Thử new/due/removed/reappeared và catch-up bằng fixtures/fake clock, không sửa DB lịch sử thật hay chờ 7 ngày để kiểm thử.
-9. Kiểm tra workbook full/delta từ DB, offline re-export batch cũ sau batch mới; raw/history/amount/time không đổi, lỗi export không recrawl.
-10. `codegraph sync` sau implementation, kiểm tra affected symbols/tests và cập nhật README bằng kết quả thực tế. Review `git diff` so với baseline commit và báo exact file list/test results; không amend/reset baseline để giấu thay đổi.
+## 4. Test seams, xác nhận và chiến lược TDD
 
-**Vì sao:** nghiệm thu phải bao phủ browser/DB/concurrency/scheduler/Excel và regression chức năng cũ, không chỉ unit state machine.
+| Public seam | Bắt được | Không chứng minh | Trạng thái xác nhận |
+| --- | --- | --- | --- |
+| Import new qualified modules; discovery old flat paths bằng importlib | Layout contract, missing import/lazy dependency khi exercise, absence của shim/legacy modules trong bản cài đặt | Không tự chứng minh logic nghiệp vụ hoặc mọi nhánh lazy import đã chạy | User đã xác nhận AC2; names chi tiết là implementation trong năm group đã chốt. |
+| Console/module CLI trong subprocess ngoài repo, installed resource reader và `Storage.init_schema`/existing roundtrip | Console script, cli wiring/imports, wheel SQL inclusion/resource anchor và actual PostgreSQL initialization | Help không chứng minh network/scheduler; resource bytes không thay schema behavior tests | User đã xác nhận AC3; không cần duyệt lại plan. |
+| Existing parser/collector/workflow/Storage/export interfaces với fixture adapters, scratch DB và Chromium/native HTTP | Behavior/transaction/baseline/guard/outputs giữ nguyên sau rewiring; cross-test helper resolution | Không live completeness, source freshness, deploy hoặc hard-kill guarantees | Full offline harness được user xác nhận ở AC4. |
+| README/path inspection, source-to-baseline mapping và AST normalization | Readability, exact file coverage và việc không lẫn logic/data changes | AST equality không thay runtime integration | AC1/AC5 đã xác nhận. |
 
-**Rủi ro:** chạy nhầm installed package cũ, migrations không packaged, live site/access thay đổi, DB/Docker/Chromium không sẵn. Báo phần chưa kiểm chứng; không dùng live failure để che regression offline.
+Không mở external seam/framework mới. Dùng existing real PostgreSQL tests và fixture collector/browser adapters, không dựng fake transaction implementation.
 
-## Danh sách file dự kiến chạm
+**TDD theo từng slice:** thêm một focused layout contract trước khi tạo đường dẫn group đó; chạy đỏ vì `ModuleNotFoundError`/old path còn tồn tại, move nhỏ nhất + rewire + clean wheel reinstall, chạy cùng tracer xanh và behavior tests của slice ngay. Đây là **interface-absence red**, không giả vờ tái hiện lỗi dữ liệu. Existing behavior tests là characterization và có thể xanh trước move; ghi nhận đúng như vậy. Không viết toàn bộ tests trước rồi mới move toàn bộ source.
 
-### Git baseline, chỉ ở IMPLEMENT
+New `tests/test_package_layout.py`: lần lượt thêm `test_processing_layout`, `test_persistence_layout`, `test_reporting_layout`, `test_acquisition_layout`, `test_workflows_layout`; mỗi test exercise imports của group và assert old module specs không tồn tại. Thêm `test_sql_resources_follow_persistence_layout` ở slice persistence để đọc đúng hai SQL resources từ installed package. Không hardcode business counts/giá.
 
-- `.git/` (repository metadata mới, có `.git/info/exclude` cho CodeGraph generated).
-- Stage/commit các file hiện có theo bước 1; không sửa chúng để tạo baseline.
+`tests/test_cli.py`: thêm `test_installed_entry_points_outside_repository`, parameterize console/module commands, subprocess cwd=`tmp_path`, help không cần DATABASE_URL; không skip khi console script thiếu. Giữ tất cả existing CLI assertions và dùng exact scratch-only db-init smoke riêng.
 
-### Sửa source/config/docs
+Docs/markers/move thuần túy không có behavior bug thích hợp để tạo red. Dùng diff, exact resource/source/wheel bytes, collection coverage và preserved existing tests làm alternative verification. Không manufacture test failure hoặc sửa assertions cũ để có red/green đẹp.
 
-- `src/hanoitourist_crawler/__init__.py`
-- `src/hanoitourist_crawler/cli.py`
-- `src/hanoitourist_crawler/collector.py`
-- `src/hanoitourist_crawler/config.py`
-- `src/hanoitourist_crawler/excel.py`
-- `src/hanoitourist_crawler/models.py`
-- `src/hanoitourist_crawler/pipeline.py`
-- `src/hanoitourist_crawler/selectors.py`
-- `src/hanoitourist_crawler/storage.py`
-- `pyproject.toml`
-- `compose.yaml`
-- `.env.example`
-- `README.md`
+## 5. Các bước IMPLEMENT theo dependency và vertical slices
 
-### Thêm source/deployment
+Mọi bước sau đây là **planned**, chưa chạy ở ARCHITECT. Không stage/commit; filesystem moves phải hỗ trợ cả tracked và untracked baseline files, không dùng `git mv` như cách vô tình stage công việc cũ.
 
-- `src/hanoitourist_crawler/scope.py`
-- `src/hanoitourist_crawler/discovery.py`
-- `src/hanoitourist_crawler/fingerprint.py`
-- `src/hanoitourist_crawler/incremental.py`
-- `src/hanoitourist_crawler/scheduler.py`
-- `src/hanoitourist_crawler/sql/002_incremental.sql`
-- `Dockerfile`
-- `.dockerignore`
+### Bước 1 — Baseline và feedback environment
 
-### Sửa tests
+**What/where:** private evidence directory mới ngoài repo; lưu pre-IMPLEMENT bytes/hashes, current PLAN riêng, baseline manifests, installed file inventory, initial collected test IDs. Reconstruct flow baseline từ HEAD archive + staged.patch + tracked.patch + 29 untracked snapshots khi cần content-level diff. Chuẩn bị clean wheel install, owned scratch PostgreSQL và Chromium preflight; chạy full suite hiện hữu trước move.
 
-- `tests/conftest.py`
-- `tests/test_cli.py`
-- `tests/test_collector.py`
-- `tests/test_config.py`
-- `tests/test_excel.py`
-- `tests/test_export.py`
-- `tests/test_parser.py`
-- `tests/test_pipeline.py`
-- `tests/test_storage.py`
+**Why/risk:** dirty tree đang chứa nhiều việc trước flow; tests có DDL, không dùng mọi localhost DB như scratch. Build cache/Chromium thiếu hoặc baseline test failure là blocker cần giải thích, không bỏ qua hoặc tự sửa ngoài scope.
 
-### Thêm tests/fixtures
+**Acceptance:** AC5; có baseline runtime mới và exact inventory để so sau move, không dùng 582 lịch sử làm bằng chứng mới.
 
-- `tests/test_scope.py`
-- `tests/test_discovery.py`
-- `tests/test_fingerprint.py`
-- `tests/test_catalogue_storage.py`
-- `tests/test_incremental.py`
-- `tests/test_scheduler.py`
-- `tests/fixtures/domestic_listing_page_1.html`
-- `tests/fixtures/domestic_listing_page_2.html`
-- `tests/fixtures/dynamic_domestic_listing.html`
+### Bước 2 — Raw fixtures → parsed snapshot qua processing paths
 
-Không dự kiến sửa logic `parser.py`, `validation.py`, `normalize.py`, `errors.py`, `export.py`, `sql/001_initial.sql`, `.gitignore` hiện có, fixtures tour lịch sử, build artifacts hoặc exports cũ. Nếu khảo sát live buộc đổi extraction, phải ghi rõ ảnh hưởng/fixture/parser version trước khi thêm vào implementation; không lồng refactor hay các features website chưa chốt vào task incremental.
+**What/where:** tạo tests package markers (root + năm nhóm); sửa bare helper/conftest imports thành qualified **current** paths. Thêm `tests/test_package_layout.py::test_processing_layout`, chạy đỏ trước source move. Move parser/normalize/validation/fingerprint và bốn test files; thêm processing marker. Sửa tất cả current callers gồm collector/discovery/pipeline/Storage/test imports cho bốn modules đã move; không đổi các modules chưa move sang future path.
 
-## Tiêu chí hoàn thành
+**Verify:** clean wheel reinstall + file-set/bytes; tracer xanh; processing tests cùng existing `tests/test_pipeline.py` và `tests/test_storage.py`. Kiểm `--collect-only` không mất existing test cases sau package bootstrap.
 
-- Có baseline Git commit của trạng thái ban đầu trước mọi implementation edits, SHA được báo lại; không secrets/runtime artifacts/DB data vào Git và không push remote.
-- Scope chỉ danh mục tour trong nước; discovery có chứng cứ coverage/pagination và không bỏ card rồi báo complete.
-- Dữ liệu cũ được tận dụng, watermark dựa vào capture thành công thật; replay/export không kéo dài TTL. Tour chưa đến hạn không có request chi tiết; tour mới/due/reappeared lấy đủ qua pipeline hiện có.
-- Không false unavailable khi listing partial hoặc network/parse lỗi; unavailable có evidence/reason, reactivation chỉ khi complete. Tour hết chỗ/hết lịch không tự bị đánh dấu unavailable.
-- Failed/partial không thay complete baseline hoặc tiến TTL; full phản ánh cached/incomplete rõ ràng, không bù/chắp dữ liệu để báo đủ.
-- Delta không nhiễu UUID/time/UI đã whitelist, bắt được thay đổi nghiệp vụ và trạng thái; full gồm toàn bộ entity trong scope chưa superseded. Re-export batch cũ offline giữ refs và nội dung lịch sử.
-- Hai XLSX publish thành bundle thành công hoặc ghi export failure rõ ràng; lỗi file không rollback data hay gây recrawl.
-- Scheduler đúng 00:00 Việt Nam, cấu hình được, persistent catch-up một lượt, không duplicate slot/chạy chồng; restart/crash giữ committed history và không làm mất các changes đã publish trong DB.
-- Migration additive/idempotent giữ dữ liệu cũ; legacy CLI/export/tests vẫn hoạt động; package/browser/image/migration resource được kiểm chứng.
-- Regression/unit/browser/Postgres/concurrency/scheduler tests có kết quả thực, phần live/Docker hoặc tests chưa chạy được báo minh bạch.
+**Why/risk:** group đầu chứng minh raw → cấu trúc qua interface mới; parser ↔ selectors cross-group cần đúng relative depth. Không đổi inventory/fingerprint/normalization/validation. **AC1/AC2/AC4.**
 
-## Điểm dừng ARCHITECT
+### Bước 3 — Installed SQL → raw/snapshot roundtrip qua persistence
 
-Kế hoạch mới này thay thế `PLAN.md` lịch sử về các fix và export một tour đã hoàn thành. Chỉ `PLAN.md` được ghi trong bước ARCHITECT. Flow tự chuyển sang IMPLEMENT; thao tác đầu tiên tại đó là Git baseline ở bước 1, rồi mới sửa code. Không chạy lệnh handoff thủ công trong flow đang hoạt động.
+**What/where:** thêm persistence tracer và SQL resource test, ghi red. Move Storage, hai SQL files, storage/catalogue_storage tests; thêm persistence marker; đổi resource anchor + pyproject package-data như mục 3.2. Sửa root CLI, scheduler, conftest và mọi Storage imports.
+
+**Verify:** clean wheel; SQL names/bytes/hash trong source/wheel/installed; tracer + resource test xanh; `tests/persistence/`, existing `tests/test_pipeline.py`, `tests/test_cli.py`. `test_history_and_roundtrip` đang gọi `init_schema` lại sau fixture initialization nên bảo vệ idempotency, replay versions và raw durability. Giữ identity/publication/frozen policy assertions trong catalogue tests.
+
+**Why/risk:** source đọc SQL được nhưng wheel thiếu SQL là lỗi dễ bị che; installed package + new UUID schemas bắt được. **AC2/AC3/AC4.**
+
+### Bước 4 — Saved data → JSON/XLSX/diagnostics qua reporting
+
+**What/where:** reporting tracer đỏ; move excel/export/diagnostics và ba test files, thêm reporting marker. Rewire root CLI, workflows chưa move và tests, gồm lazy diagnostic/export imports và `from hanoitourist_crawler import excel` → `from hanoitourist_crawler.reporting import excel`.
+
+**Verify:** clean wheel; tracer xanh; reporting tests + `tests/test_cli.py`; preserve atomic bundle/receipt, precision/formula/null/partial-display, diagnostic redaction/private-output checks.
+
+**Why/risk:** string monkeypatch của `os.replace`/`_batch_workbook` và module-object imports phải trỏ cùng implementation, không thêm facade để giữ tests cũ. Không tối ưu Excel. **AC2/AC3/AC4.**
+
+### Bước 5 — Offline browser/listing → durable raw qua acquisition
+
+**What/where:** acquisition tracer đỏ; move năm acquisition modules + bốn test files, thêm marker. Rewire parser selectors, fingerprint/Storage scope consumers, workflows/root imports và test helpers thành `tests.acquisition.*`; giữ nested/lazy imports.
+
+**Verify:** clean wheel; tracer xanh; `tests/acquisition/` + processing tests. Chạy riêng native meta-refresh safety regression rồi cả acquisition group; forbidden targets phải vẫn có zero hits theo assertions hiện hữu.
+
+**Why/risk:** nhiều dependencies đến selectors/collector và DiagnosticCollector; giữ request guard teardown/order, không đổi class defaults hoặc monkeypatch targets để tránh test. **AC2/AC4.**
+
+### Bước 6 — Daily/retry/recovery/legacy orchestration qua workflows và CLI
+
+**What/where:** workflows tracer đỏ; move năm workflow modules và năm test files, thêm marker. Rewire root CLI static/lazy imports, test_incremental helpers sang `tests.workflows.*`, diagnostics/report references. Giữ `attempts` import sibling pipeline module; root versions lấy từ parent package. Thêm outside-repo installed entry-points test vào `tests/test_cli.py`.
+
+**Verify:** clean wheel; tracer xanh; workflows + root CLI + persistence/reporting integration. Completion visibility/native SQL rollback, stopped retry, scoped selection/recovery, no-acquire/no-parse recovery, historical frozen output, scheduler pure/fixture tests phải vẫn chạy. Chỉ chạy scheduler **tests**, không CLI `schedule` ngoài `--help`.
+
+**Why/risk:** daily/retry/recovery deliberately có transaction policies khác nhau; chỉ thay imports, không gộp paths. **AC2/AC3/AC4.**
+
+### Bước 7 — Đường đọc và verification toàn hệ thống
+
+**What/where:** README theo mục 3.5. Final clean wheel/install; full suite với scratch/Chromium; CLI/help/db-init smoke ngoài repo; source/wheel/installed/baseline/AST/collection/dependency/diff checks; attribution report và cleanup owned resources.
+
+**Why/risk:** individual group tests không đủ chứng minh toàn graph/entry points. Final report phải phân biệt tests đã chạy, historical evidence, failures và exceptions; không sửa báo cáo lịch sử. Full harness timeout tối thiểu 1800s mỗi baseline/final invocation, không tăng crawler timeouts để làm tests xanh.
+
+**Acceptance:** AC1–AC5; không remaining required skip/failure/verification exception trừ user explicitly chấp nhận.
+
+## 6. Exact affected-file manifest
+
+Mọi destination dưới đây là **NEW path**; source path cũ bị remove vì move, không để shim. Contents được giữ ngoài import/resource rewiring đã nêu.
+
+### 6.1 Move source và SQL (20 paths)
+
+Prefix source cũ là `src/hanoitourist_crawler/`; destination cùng prefix.
+
+| Old relative path | New relative path |
+| --- | --- |
+| incremental.py | workflows/incremental.py |
+| retry.py | workflows/retry.py |
+| attempts.py | workflows/attempts.py |
+| pipeline.py | workflows/pipeline.py |
+| scheduler.py | workflows/scheduler.py |
+| discovery.py | acquisition/discovery.py |
+| collector.py | acquisition/collector.py |
+| navigation.py | acquisition/navigation.py |
+| scope.py | acquisition/scope.py |
+| selectors.py | acquisition/selectors.py |
+| parser.py | processing/parser.py |
+| normalize.py | processing/normalize.py |
+| validation.py | processing/validation.py |
+| fingerprint.py | processing/fingerprint.py |
+| storage.py | persistence/storage.py |
+| sql/001_initial.sql | persistence/sql/001_initial.sql |
+| sql/002_incremental.sql | persistence/sql/002_incremental.sql |
+| excel.py | reporting/excel.py |
+| export.py | reporting/export.py |
+| diagnostics.py | reporting/diagnostics.py |
+
+### 6.2 Move tests (18 paths)
+
+Prefix cả hai cột là `tests/`.
+
+| Old relative path | New relative path |
+| --- | --- |
+| test_incremental.py | workflows/test_incremental.py |
+| test_retry.py | workflows/test_retry.py |
+| test_attempts.py | workflows/test_attempts.py |
+| test_pipeline.py | workflows/test_pipeline.py |
+| test_scheduler.py | workflows/test_scheduler.py |
+| test_discovery.py | acquisition/test_discovery.py |
+| test_collector.py | acquisition/test_collector.py |
+| test_navigation.py | acquisition/test_navigation.py |
+| test_scope.py | acquisition/test_scope.py |
+| test_parser.py | processing/test_parser.py |
+| test_normalize.py | processing/test_normalize.py |
+| test_validation.py | processing/test_validation.py |
+| test_fingerprint.py | processing/test_fingerprint.py |
+| test_storage.py | persistence/test_storage.py |
+| test_catalogue_storage.py | persistence/test_catalogue_storage.py |
+| test_excel.py | reporting/test_excel.py |
+| test_export.py | reporting/test_export.py |
+| test_diagnostics.py | reporting/test_diagnostics.py |
+
+### 6.3 Create (12 files, ngoài destinations của moves)
+
+- `src/hanoitourist_crawler/workflows/__init__.py`
+- `src/hanoitourist_crawler/acquisition/__init__.py`
+- `src/hanoitourist_crawler/processing/__init__.py`
+- `src/hanoitourist_crawler/persistence/__init__.py`
+- `src/hanoitourist_crawler/reporting/__init__.py`
+- `tests/__init__.py`
+- `tests/workflows/__init__.py`
+- `tests/acquisition/__init__.py`
+- `tests/processing/__init__.py`
+- `tests/persistence/__init__.py`
+- `tests/reporting/__init__.py`
+- `tests/test_package_layout.py`
+
+### 6.4 Edit existing files còn tại chỗ
+
+- `PLAN.md` — ARCHITECT output này, thay historical plan đã đọc.
+- `src/hanoitourist_crawler/cli.py` — imports/lazy imports mới, không thay command/options/output/exit codes.
+- `tests/conftest.py` — imports mới, giữ mọi fixture bodies/FIXTURES path.
+- `tests/test_cli.py` — imports/monkeypatch paths và new outside-repo entry-point test.
+- `pyproject.toml` — chỉ package-data owner/path; không đổi requirements/scripts/versions/pytest settings.
+- `README.md` — map/read-order/current affected guidance và verification mới theo evidence thật.
+
+### 6.5 Giữ nguyên
+
+Root `__init__.py`, `__main__.py`, `config.py`, `models.py`, `errors.py`; `tests/test_config.py`, `tests/test_errors.py`; mọi `tests/fixtures/`; `GLOSSARY.md`; `.env.example`, `.gitignore`, `.dockerignore`, Dockerfile, Compose; exports/evidence/history; các business DB/containers/volumes/scheduler. Không tạo docs/ hoặc ADR. Không manual edit generated egg-info/build metadata. Không file deletion khác ngoài old locations của moves.
+
+## 7. Exact verification commands và expected outcomes
+
+**Đây là commands cho IMPLEMENT, chưa được chạy trong ARCHITECT.** Chạy từ repo root trừ subshell outside repo. Dùng logs/JUnit/private scripts dưới D, không logs/credential files trong repo; redact secrets. Không echo env/DSN, bật shell tracing hoặc dùng `tee` làm mất exit code.
+
+### 7.1 Environment và clean wheel installation (lặp sau mỗi slice)
+
+```bash
+export REPO="$PWD"
+export PY="$REPO/.venv/bin/python"
+export CLI="$REPO/.venv/bin/hanoitourist"
+export PYTHONDONTWRITEBYTECODE=1
+unset PYTHONPATH
+umask 077
+export D="$(mktemp -d "${TMPDIR:-/tmp}/hanoitourist-layout-check.XXXXXX")"
+```
+
+Định nghĩa helper tạm trong shell của implement, không thêm build script vào repo:
+
+```bash
+install_clean_wheel() {
+  export BUILD_DIR="$(mktemp -d "$D/build.XXXXXX")"
+  "$PY" -B - <<'PY'
+import os, shutil
+from pathlib import Path
+repo = Path(os.environ['REPO'])
+project = Path(os.environ['BUILD_DIR']) / 'project'
+project.mkdir()
+for name in ('pyproject.toml', 'README.md'):
+    shutil.copy2(repo / name, project / name)
+shutil.copytree(repo / 'src/hanoitourist_crawler', project / 'src/hanoitourist_crawler',
+                ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo'))
+PY
+  uv build --offline --python "$PY" --wheel \
+    --out-dir "$BUILD_DIR/dist" "$BUILD_DIR/project" || return
+  export WHEEL="$("$PY" -B -c 'import os; from pathlib import Path; xs=list((Path(os.environ["BUILD_DIR"])/"dist").glob("*.whl")); assert len(xs)==1; print(xs[0])')"
+  uv pip install --python "$PY" --offline --no-deps \
+    --reinstall-package hanoitourist-crawler "$WHEEL"
+}
+install_clean_wheel
+uv pip check --python "$PY"
+```
+
+Không thêm dependency, không `--no-build-isolation` workaround. Nếu declared build dependencies không có offline cache, báo prerequisite; không cài/chạy package cũ thay source mới. Sau **mỗi** install chạy private equality checker: source `*.py/*.sql` relative file set và bytes phải bằng wheel package entries và installed package files (bỏ pycache); installed root không được resolve về repo/src. Check trước baseline và sau từng green slice. Final count 29 Python + 2 SQL; old flat 18 modules và root SQL files không có trong cả source/wheel/installed.
+
+### 7.2 Owned scratch PostgreSQL, không dùng business DB
+
+```bash
+docker image inspect postgres:17-alpine --format '{{.Id}}'
+export FLOW_RUN="$("$PY" -B -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+export SCRATCH_NAME="hanoitourist-layout-$FLOW_RUN"
+export POSTGRES_USER=postgres POSTGRES_DB=directory_layout_test
+export POSTGRES_PASSWORD="$("$PY" -B -c 'import secrets; print(secrets.token_urlsafe(24))')"
+export SCRATCH_ID="$(docker run -d --name "$SCRATCH_NAME" \
+  --label purpose=directory-layout-tests --label "flow-run=$FLOW_RUN" \
+  -e POSTGRES_USER -e POSTGRES_DB -e POSTGRES_PASSWORD \
+  -p 127.0.0.1::5432 --tmpfs /var/lib/postgresql/data:rw postgres:17-alpine)"
+export SCRATCH_PORT="$(docker port "$SCRATCH_NAME" 5432/tcp | awk -F: '{print $NF}')"
+export TEST_DATABASE_URL="$("$PY" -B -c 'import os; from psycopg.conninfo import make_conninfo; print(make_conninfo(host="127.0.0.1", port=os.environ["SCRATCH_PORT"], dbname=os.environ["POSTGRES_DB"], user=os.environ["POSTGRES_USER"], password=os.environ["POSTGRES_PASSWORD"], connect_timeout="5"))')"
+```
+
+Private preflight (ghi script/log trong D khi implement): bounded readiness <= khoảng 35s, verify Docker exact ID/name/two labels/loopback binding và `current_database() == 'directory_layout_test'` trước DDL; không in Docker Config.Env/DSN/password. `TEST_DATABASE_URL` phải là URL vừa tạo, không nhận inherited URL/.env fallback. Các pytest fixtures tạo/drop UUID schemas trong DB này. Chromium launch/close preflight thật; missing Chromium là blocker, không tự download/install/change versions để né lỗi. Không Compose operations hoặc inspect/use credentials từ project DB.
+
+### 7.3 Baseline, red/green và targeted behavior commands
+
+Mỗi invocation lưu command, exit status thật, elapsed time, pass/fail/skip/deselected và JUnit ở D. Harness timeout >=1800s cho baseline/full, không che timeout bằng success. `-ra` phải hiện skip reasons. Dùng scratch env ở mọi command cần DB.
+
+```bash
+# B0: trước source/test restructure; inventory + full baseline mới (AC4/AC5)
+"$PY" -B -m pytest -p no:cacheprovider --collect-only -q
+"$PY" -B -m pytest -p no:cacheprovider -q -ra --junitxml="$D/baseline.xml"
+
+# Sau tests package bootstrap: collection vẫn giữ đủ baseline cases.
+"$PY" -B -m pytest -p no:cacheprovider --collect-only -q
+
+# S1 processing tracer: chạy cùng command trước move (đỏ) và sau clean reinstall (xanh)
+"$PY" -B -m pytest -p no:cacheprovider -q -ra tests/test_package_layout.py::test_processing_layout
+"$PY" -B -m pytest -p no:cacheprovider -q -ra tests/processing/ tests/test_pipeline.py tests/test_storage.py
+
+# S2 persistence tracer/resource: thêm ngay trước slice này, red rồi green
+"$PY" -B -m pytest -p no:cacheprovider -q -ra tests/test_package_layout.py -k persistence
+"$PY" -B -m pytest -p no:cacheprovider -q -ra tests/persistence/ tests/test_pipeline.py tests/test_cli.py
+
+# S3 reporting tracer: red trước move, green sau reinstall
+"$PY" -B -m pytest -p no:cacheprovider -q -ra tests/test_package_layout.py::test_reporting_layout
+"$PY" -B -m pytest -p no:cacheprovider -q -ra tests/reporting/ tests/test_cli.py
+
+# S4 acquisition tracer + explicit existing safety regression, sau đó cả group
+"$PY" -B -m pytest -p no:cacheprovider -q -ra tests/test_package_layout.py::test_acquisition_layout
+"$PY" -B -m pytest -p no:cacheprovider -q -ra \
+  tests/acquisition/test_navigation.py::test_html_native_navigation_bounds_fail_closed
+"$PY" -B -m pytest -p no:cacheprovider -q -ra tests/acquisition/ tests/processing/
+
+# S5 workflows tracer: red rồi green, các interfaces consumers cùng chạy
+"$PY" -B -m pytest -p no:cacheprovider -q -ra tests/test_package_layout.py::test_workflows_layout
+"$PY" -B -m pytest -p no:cacheprovider -q -ra \
+  tests/workflows/ tests/test_cli.py tests/persistence/ tests/reporting/
+
+# Final: full integrated suite, không filter browser/postgres (AC2–AC5)
+"$PY" -B -m pytest -p no:cacheprovider -q -ra --junitxml="$D/final.xml"
+```
+
+Expected: B0/new full tests thực sự pass; red tracers đúng missing/new layout, không environment/collection fault; green tracers + behavior suites pass. JUnit final zero failures/errors/skips; không hardcode 582 làm acceptance, không mất existing cases sau mapping paths. Nếu case names/parameters cũ biến mất, giải thích và sửa relocation thay vì giảm suite. Không `pytest -m 'not browser and not postgres'` thay full verification. Native regression failures không được nới hit assertions, tăng budgets hoặc đổi acquisition logic ngoài task.
+
+### 7.4 Installed CLI/resources ngoài repository
+
+Tests CLI mới chạy subprocess từ tmp_path cho cả console và module `--help`, database env absent, exit 0 và cùng command/options hiện hữu. Smoke đầy đủ thêm:
+
+```bash
+(cd "$D" && "$CLI" --help)
+(cd "$D" && "$PY" -B -m hanoitourist_crawler --help)
+for command in db crawl crawl-domestic retry-domestic retry-report export-batch schedule parse export; do
+  (cd "$D" && "$CLI" "$command" --help) || break
+  (cd "$D" && "$PY" -B -m hanoitourist_crawler "$command" --help) || break
+done
+# CHỈ sau scratch ownership/DB identity verification; env override riêng từng process.
+(cd "$D" && DATABASE_URL="$TEST_DATABASE_URL" "$CLI" db init)
+(cd "$D" && DATABASE_URL="$TEST_DATABASE_URL" "$PY" -B -m hanoitourist_crawler db init)
+```
+
+Runner phải bắt exit của **từng command** trong vòng lặp; `break` không được tính như toàn loop pass. Help không gọi Config/DB; db-init chỉ có DDL additive trên owned scratch. Kiểm 13 bảng expected trong scratch public schema và lần init thứ hai không đổi schema/rows. New UUID-schema Storage roundtrip tests vẫn là evidence actual SQL loading độc lập với public init idempotency. Đọc hai resources bằng importlib.resources từ installed persistence package, so hash/bytes với baseline SQL và wheel. Không chạy các lệnh crawl/retry/schedule có tác động ngoài `--help`.
+
+### 7.5 Static, preservation và collection checks
+
+```bash
+uv pip check --python "$PY"
+git diff --check
+# Expected: không còn old qualified source path trong executable source/tests.
+rg -n 'hanoitourist_crawler\.(attempts|collector|diagnostics|discovery|excel|export|fingerprint|incremental|navigation|normalize|parser|pipeline|retry|scheduler|scope|selectors|storage|validation)\b' src tests
+# Expected: không bare cross-test/conftest imports.
+rg -n '^\s*(from (test_[a-z_]+|conftest) import|import test_[a-z_]+\b)' tests
+```
+
+Với no-match searches, exit 1 là expected; matches phải được xem xét, không bọc thành success. New layout tests có thể chứa old paths như **negative assertions**: whitelist đúng literals trong `tests/test_package_layout.py`, không xóa test để search sạch. Relative imports không được bắt hết bởi rg: AST/import tests mới là kiểm chứng chính.
+
+Private checker trong D khi implement:
+
+- Parse mọi current source/test `.py` bằng `ast.parse` (không compileall/pycache repo). Dự kiến final 29 source + 29 test/conftest/marker files nếu đúng manifest.
+- Compare logical pre/post file mapping tại mục 6: normalize Import/ImportFrom qualified paths và exact monkeypatch-path literals theo relocation; cho phép duy nhất SQL resource anchor ở `Storage.init_schema`. Remaining production AST phải bằng baseline; import-free moves và SQL phải byte-equal. Không bỏ qua cả function body/class/strings để tạo false equality. New marker/layout tests/CLI additions được review riêng; existing test assertions, decorators/parameters/fixtures không bị thay ngoài path rewiring.
+- Root protected files/fixtures/config/versions/exports giữ exact baseline bytes. `.git` index/staged patch không đổi; không stage dirty work.
+- Reconstruct official baseline **file contents**, apply move map rồi compare current tree kể cả untracked destinations. Không dùng diff-of-patches làm implementation diff, không để Git HEAD-only view bỏ mất untracked modules. Phân biệt PLAN-only architect change và source/test/docs implement changes.
+- Normalize original collection node IDs theo test move map, assert mọi existing case còn được collect; new contract/CLI cases là phần tăng thêm. Chạy final suite trên đúng installed wheel bytes.
+- README map đúng current paths, nêu đường đọc và cross-group caveat; historical evidence blocks không thay kết quả. Lưu attribution/verification report sanitized.
+
+## 8. Rủi ro, rollout, migration và rollback
+
+- **Relative/lazy imports:** một cấp `.` sai hoặc eager package re-export gây cycle/wrong module binding. Empty markers + fresh-process imports + existing runtime tests, giữ lazy position và pipeline module object.
+- **Cross-test imports/fixtures:** bare imports hoặc tests package collision có thể mất collection/reimport conftest. Qualified tests paths và unchanged fixtures; collection mapping + full run từ installed package, không sys.path hacks.
+- **Stale artifacts:** same-version wheel chứa old flat files từ build/lib, hoặc venv chưa reinstall. Clean temp project/wheel + exact file-set/bytes + negative import checks; không sửa ignored/user artifacts hoặc tin version alone.
+- **SQL not packaged:** source-tree pass không đủ. Quoted package-data key + installed resource read/init/roundtrip và immutable hashes; không đưa SQL logic changes vào move.
+- **Behavior drift/noise:** không reformat/rename functions/merge policies hoặc tối ưu khi đang move. Body-level AST/content comparison và full offline integration bảo vệ baseline.
+- **Prerequisites/skip/timeouts:** local image hiện có không đồng nghĩa Docker ready; Chromium/build cache phải verify khi implement. Required failure/skip không tự thành pass; dừng và báo hoặc xin accepted exception, không truy cập business DB để thay scratch.
+- **Historical consumers:** internal imports cũ cố ý không tương thích theo scope đã chốt. README công bố new paths; CLI/output vẫn tương thích. Historical diagnostics scripts dưới ignored exports có thể chứa old imports: giữ bằng chứng đó nguyên, không chạy hay rewrite chúng; rerun script lịch sử là task riêng.
+
+**Rollout:** source/tests/docs + normal local wheel install cho verification, không deploy hoặc cập nhật scheduler image. Dockerfile hiện COPY src nên không cần path change; Docker/container readiness không được chứng nhận bởi task này.
+
+**Migration:** không có DB/schema/data migration hoặc backfill. SQL files chỉ move byte-for-byte. Không business data operation; CLI db init chỉ trong scratch.
+
+**Rollback:** dùng pre-IMPLEMENT snapshot và move map để đảo chỉ các thay đổi flow; giữ lại dirty/untracked content gốc theo official baseline. Không `git reset --hard`, `git clean`, revert về HEAD hoặc xóa untracked source cũ của user. Nếu cần phục hồi runtime local, dựng/install lại clean wheel từ preserved pre-move source; không đổi dependencies/schema/version để rollback.
+
+**Cleanup:** trước remove phải verify exact `SCRATCH_ID`, name, labels purpose/flow-run; kiểm không còn UUID test schemas rồi `docker rm -f "$SCRATCH_ID"` chỉ với container do lượt này tạo. Không Compose down, volume prune hoặc xóa container khác. Xóa private DSN/secret file nếu có, unset TEST_DATABASE_URL/POSTGRES_PASSWORD và credential env do lượt này tạo; giữ sanitized reports/logs/red→green evidence. Không overwrite hoặc di chuyển exports/evidence cũ.
+
+## 9. Open questions và required handoff
+
+**Không còn blocking product/design question.** Scope, compatibility/no-shim, tests grouping, docs extent và required verification đã được user xác nhận. Group membership, regular package markers, qualified test imports và resource owner là technical choices trong scope, không cần second approval của toàn plan. Môi trường runtime chưa được chứng nhận; prerequisite failure ở IMPLEMENT phải xử lý như blocker/explicit exception, không âm thầm hạ acceptance.
+
+IMPLEMENT handoff phải có: exact moved/created/edited paths so baseline gồm untracked; red→green import tracers phân biệt characterization; fresh baseline/final commands, durations/counts/skips/JUnit; scratch ownership/cleanup không secrets; source/wheel/installed/resources/AST/collection/help/dependencies/diff evidence; README map và historical-preservation review; mọi failures/accepted exceptions; xác nhận không live/business DB/scheduler/deploy, không domain/glossary/ADR changes. Kết quả offline không chứng nhận live completeness/freshness hoặc production deployment.

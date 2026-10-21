@@ -152,3 +152,29 @@ class Snapshot:
     departures: list[Departure] = field(default_factory=list)
     id: str = field(default_factory=uid)
     parsed_at: datetime = field(default_factory=now)
+
+
+@dataclass
+class DiscoveredTour:
+    url: str
+    title: str
+    source_tour_id: str | None
+    provenance: list
+    identity_error: str = ''
+
+
+@dataclass
+class DiscoveryResult:
+    status: str
+    cards: list = field(default_factory=list)
+    pages: list = field(default_factory=list)
+    errors: list = field(default_factory=list)
+    terminal: bool = False
+
+
+@dataclass
+class BatchResult:
+    batch_id: str | None
+    status: str
+    counts: dict = field(default_factory=dict)
+    paths: dict = field(default_factory=dict)
