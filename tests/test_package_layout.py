@@ -34,5 +34,6 @@ def test_persistence_layout():
 
 def test_sql_resources_follow_persistence_layout():
     root = files('hanoitourist_crawler.persistence').joinpath('sql')
-    assert {p.name for p in root.iterdir()} == {'001_initial.sql'}
-    assert 'CREATE TABLE IF NOT EXISTS' in root.joinpath('001_initial.sql').read_text()
+    assert {p.name for p in root.iterdir()} == {'001_initial.sql', '002_incremental.sql'}
+    for name in ('001_initial.sql', '002_incremental.sql'):
+        assert 'CREATE TABLE IF NOT EXISTS' in root.joinpath(name).read_text()

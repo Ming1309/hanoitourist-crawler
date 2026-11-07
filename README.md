@@ -39,6 +39,8 @@ docker compose up -d --wait
 .venv/bin/hanoitourist db init
 ```
 
+`db init` chạy lần lượt `001_initial.sql` (raw/snapshot) và `002_incremental.sql` (catalogue/scheduler). Giữ riêng hai file này; thay đổi đổi tên bảng đã gộp vào schema tương ứng, không cần file `003` riêng.
+
 ## 3. Crawl
 
 ### Crawl catalogue tour trong nước

@@ -31,8 +31,9 @@ class Storage:
 
     def init_schema(self):
         with self.connection.transaction():
-            script = files('hanoitourist_crawler.persistence').joinpath('sql', '001_initial.sql').read_text()
-            self.connection.execute(script)
+            for name in ('001_initial.sql', '002_incremental.sql'):
+                script = files('hanoitourist_crawler.persistence').joinpath('sql', name).read_text()
+                self.connection.execute(script)
 
     def preflight(self):
         self.connection.execute('SELECT id FROM crawl_runs LIMIT 0')
