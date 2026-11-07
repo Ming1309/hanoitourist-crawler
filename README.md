@@ -39,8 +39,6 @@ docker compose up -d --wait
 .venv/bin/hanoitourist db init
 ```
 
-`db init` idempotent, chỉ áp dụng migration còn thiếu, không DROP hay ghi đè dữ liệu. Nếu cổng 5432 đã bận, đổi **cả** `POSTGRES_PORT` và port trong `DATABASE_URL` (ví dụ 55432). Không commit `.env`.
-
 ## 3. Crawl
 
 ### Crawl catalogue tour trong nước

@@ -230,7 +230,7 @@ def test_invalid_saved_receipt_fails_without_repair(storage, capture_history, tm
     receipt = storage.get_batch(batch)['export_manifest']
     receipt[invalid] = {} if invalid == 'files' else ''
     # Deliberate historical corruption only in this disposable test schema.
-    storage.connection.execute('UPDATE domestic_batches SET export_manifest=%s WHERE id=%s', (Jsonb(receipt), batch))
+    storage.connection.execute('UPDATE crawl_batches SET export_manifest=%s WHERE id=%s', (Jsonb(receipt), batch))
     before = storage.get_batch(batch)
     original = {p.name:p.read_bytes() for p in paths['full'].parent.iterdir()}
     with pytest.raises(ValueError, match='[Rr]eceipt'):

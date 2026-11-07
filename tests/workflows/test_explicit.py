@@ -110,7 +110,7 @@ def test_invalid_urls_are_rejected_before_any_batch_or_run(storage, tmp_path, ur
         crawl_domestic(config(tmp_path), storage, urls=[DEFAULT_TOUR_URL, url],
                        collector_class=target_collector([], calls=calls))
     assert calls == []
-    assert storage.connection.execute('SELECT count(*) AS n FROM domestic_batches').fetchone()['n'] == 0
+    assert storage.connection.execute('SELECT count(*) AS n FROM crawl_batches').fetchone()['n'] == 0
     assert storage.connection.execute('SELECT count(*) AS n FROM crawl_runs').fetchone()['n'] == 0
 
 
@@ -195,7 +195,7 @@ def test_interrupted_explicit_batch_is_recoverable_and_retryable(storage, docume
                        collector_class=target_collector(documents, calls=calls,
                                                         interrupting={NEW_URL}))
     batch = str(storage.connection.execute(
-        'SELECT id FROM domestic_batches ORDER BY started_at DESC LIMIT 1').fetchone()['id'])
+        'SELECT id FROM crawl_batches ORDER BY started_at DESC LIMIT 1').fetchone()['id'])
     rows = {r['tour_id']: r for r in storage.batch_tours(batch)}
     second = next(t for t in storage.list_tours() if t['canonical_url'] == NEW_URL)
     assert calls == [DEFAULT_TOUR_URL, NEW_URL]

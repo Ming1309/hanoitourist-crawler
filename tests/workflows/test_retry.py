@@ -80,11 +80,11 @@ def test_old_complete_still_eligible_newer_success_skips(storage, capture_histor
 
 def test_invalid_input_zero_writes(storage, capture_history, tmp_path):
     batch, _, _ = source_failure(storage, capture_history)
-    before = storage.connection.execute('SELECT count(*) AS n FROM domestic_batches').fetchone()['n']
+    before = storage.connection.execute('SELECT count(*) AS n FROM crawl_batches').fetchone()['n']
     config = Config(database_url='unused', export_dir=tmp_path)
     with pytest.raises(ValueError):
         retry_domestic(config, storage, batch, [DEFAULT_TOUR_URL, 'https://hanoitourist.vn/nope'])
-    assert storage.connection.execute('SELECT count(*) AS n FROM domestic_batches').fetchone()['n'] == before
+    assert storage.connection.execute('SELECT count(*) AS n FROM crawl_batches').fetchone()['n'] == before
     assert not list(tmp_path.iterdir())
 
 

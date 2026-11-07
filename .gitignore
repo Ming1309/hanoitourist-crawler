@@ -8,3 +8,4 @@ dist/
 exports/
 /archive/
 .DS_Store
+.claude/

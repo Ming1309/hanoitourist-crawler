@@ -31,9 +31,8 @@ class Storage:
 
     def init_schema(self):
         with self.connection.transaction():
-            for name in ('001_initial.sql', '002_incremental.sql'):
-                script = files('hanoitourist_crawler.persistence').joinpath('sql', name).read_text()
-                self.connection.execute(script)
+            script = files('hanoitourist_crawler.persistence').joinpath('sql', '001_initial.sql').read_text()
+            self.connection.execute(script)
 
     def preflight(self):
         self.connection.execute('SELECT id FROM crawl_runs LIMIT 0')
@@ -134,8 +133,8 @@ class Storage:
 
     def preflight_incremental(self):
         self.preflight()
-        for table in ('domestic_batches', 'domestic_tours', 'domestic_tour_urls',
-                      'domestic_batch_tours', 'scheduler_state'):
+        for table in ('crawl_batches', 'tours', 'tour_urls',
+                      'crawl_batch_tours', 'scheduler_state'):
             if not self.connection.execute('SELECT to_regclass(%s) AS name', (table,)).fetchone()['name']:
                 raise ValueError('Incremental schema missing; run db init')
 
@@ -151,13 +150,13 @@ class Storage:
 
     def create_batch(self, scheduled_for=None):
         batch_id = uid()
-        self.connection.execute('INSERT INTO domestic_batches(id,origin,scheduled_for,started_at) '
+        self.connection.execute('INSERT INTO crawl_batches(id,origin,scheduled_for,started_at) '
                                 'VALUES (%s,%s,%s,%s)',
                                 (batch_id, 'scheduled' if scheduled_for else 'manual', scheduled_for, now()))
         return batch_id
 
     def get_batch(self, batch_id):
-        row = self.connection.execute('SELECT * FROM domestic_batches WHERE id=%s', (batch_id,)).fetchone()
+        row = self.connection.execute('SELECT * FROM crawl_batches WHERE id=%s', (batch_id,)).fetchone()
         if not row:
             raise ValueError('Unknown domestic batch')
         return self._clean(row)
@@ -172,27 +171,27 @@ class Storage:
         # update also rejects stale/concurrent success or failure acknowledgements.
         condition = " AND export_manifest='{}'::jsonb" if values.keys() & {
             'export_status', 'export_manifest', 'export_errors'} else ''
-        self.connection.execute('UPDATE domestic_batches SET ' + ','.join(f'{k}=%s' for k in values)
+        self.connection.execute('UPDATE crawl_batches SET ' + ','.join(f'{k}=%s' for k in values)
                                 + ' WHERE id=%s' + condition, (*params, batch_id))
 
     def list_tours(self):
-        rows = self.connection.execute('SELECT * FROM domestic_tours WHERE superseded_by_id IS NULL '
+        rows = self.connection.execute('SELECT * FROM tours WHERE superseded_by_id IS NULL '
                                        'ORDER BY canonical_url,id').fetchall()
         return [self._clean(row) for row in rows]
 
     def get_tour(self, tour_id):
-        row = self.connection.execute('SELECT * FROM domestic_tours WHERE id=%s', (tour_id,)).fetchone()
+        row = self.connection.execute('SELECT * FROM tours WHERE id=%s', (tour_id,)).fetchone()
         if not row:
             raise ValueError('Unknown domestic tour')
         return self._clean(row)
 
     def tour_aliases(self, tour_id):
-        rows = self.connection.execute('SELECT url_key FROM domestic_tour_urls WHERE tour_id=%s ORDER BY url_key',
+        rows = self.connection.execute('SELECT url_key FROM tour_urls WHERE tour_id=%s ORDER BY url_key',
                                        (tour_id,)).fetchall()
         return [row['url_key'] for row in rows]
 
     def get_tour_by_source_id(self, source_id):
-        row = self.connection.execute('SELECT * FROM domestic_tours WHERE source_tour_id=%s '
+        row = self.connection.execute('SELECT * FROM tours WHERE source_tour_id=%s '
                                       'AND superseded_by_id IS NULL', (source_id,)).fetchone()
         return self._clean(row) if row else None
 
@@ -203,14 +202,14 @@ class Storage:
                    'last_seen_batch_id', 'requires_refresh', 'fingerprint', 'fingerprint_version', 'superseded_by_id'}
         if not values or not values.keys() <= allowed:
             raise ValueError('Invalid tour update')
-        self.connection.execute('UPDATE domestic_tours SET ' + ','.join(f'{k}=%s' for k in values)
+        self.connection.execute('UPDATE tours SET ' + ','.join(f'{k}=%s' for k in values)
                                 + ' WHERE id=%s', (*values.values(), tour_id))
 
     def register_tour(self, url, title, batch_id, source_id=None, *, listed=True):
         from ..processing.fingerprint import fingerprint, FINGERPRINT_VERSION
         with self.connection.transaction():
-            existing = self.connection.execute('SELECT t.* FROM domestic_tour_urls u '
-                'JOIN domestic_tours t ON t.id=u.tour_id WHERE u.url_key=%s', (url,)).fetchone()
+            existing = self.connection.execute('SELECT t.* FROM tour_urls u '
+                'JOIN tours t ON t.id=u.tour_id WHERE u.url_key=%s', (url,)).fetchone()
             if existing:
                 tour_id = str(existing['id'])
             else:
@@ -222,13 +221,13 @@ class Storage:
                     (url, url, source_id, source_id)).fetchone()
                 snapshot = self.get_snapshot_by_id(history['id']) if history else None
                 sid = snapshot.source_tour_id if snapshot else None
-                matched = self.connection.execute('SELECT id FROM domestic_tours WHERE source_tour_id=%s '
+                matched = self.connection.execute('SELECT id FROM tours WHERE source_tour_id=%s '
                     'AND superseded_by_id IS NULL', (sid,)).fetchone() if sid else None
                 if matched:
                     tour_id = str(matched['id'])
                 else:
                     tour_id = uid()
-                    self.connection.execute('INSERT INTO domestic_tours(id,canonical_url,listing_title) VALUES (%s,%s,%s)',
+                    self.connection.execute('INSERT INTO tours(id,canonical_url,listing_title) VALUES (%s,%s,%s)',
                                             (tour_id, url, title))
                     if snapshot:
                         complete = snapshot.status == 'complete' and history['capture_status'] == 'complete'
@@ -239,24 +238,24 @@ class Storage:
                             last_successful_check_at=history['finished_at'] if complete else None,
                             fingerprint=fingerprint(snapshot) if complete else None,
                             fingerprint_version=FINGERPRINT_VERSION if complete else None)
-                self.connection.execute('INSERT INTO domestic_tour_urls(url_key,tour_id,first_seen_at) VALUES (%s,%s,%s)',
+                self.connection.execute('INSERT INTO tour_urls(url_key,tour_id,first_seen_at) VALUES (%s,%s,%s)',
                                         (url, tour_id, now()))
             if listed:
                 self._update_tour(tour_id, is_listed=True, listing_title=title, last_seen_batch_id=batch_id)
-                self.connection.execute('UPDATE domestic_tour_urls SET last_seen_batch_id=%s WHERE url_key=%s',
+                self.connection.execute('UPDATE tour_urls SET last_seen_batch_id=%s WHERE url_key=%s',
                                         (batch_id, url))
             self.ensure_batch_tour(batch_id, tour_id, discovered=listed)
             return self.get_tour(tour_id)
 
     def ensure_batch_tour(self, batch_id, tour_id, *, discovered=False):
         tour = self.get_tour(tour_id)
-        self.connection.execute('INSERT INTO domestic_batch_tours(batch_id,tour_id,discovered,previous_snapshot_id,'
+        self.connection.execute('INSERT INTO crawl_batch_tours(batch_id,tour_id,discovered,previous_snapshot_id,'
             'previous_availability,previous_fingerprint) VALUES (%s,%s,%s,%s,%s,%s) '
-            'ON CONFLICT(batch_id,tour_id) DO UPDATE SET discovered=domestic_batch_tours.discovered OR EXCLUDED.discovered',
+            'ON CONFLICT(batch_id,tour_id) DO UPDATE SET discovered=crawl_batch_tours.discovered OR EXCLUDED.discovered',
             (batch_id, tour_id, discovered, tour['current_snapshot_id'], tour['availability'], tour['fingerprint']))
 
     def batch_tours(self, batch_id):
-        rows = self.connection.execute('SELECT * FROM domestic_batch_tours WHERE batch_id=%s ORDER BY tour_id',
+        rows = self.connection.execute('SELECT * FROM crawl_batch_tours WHERE batch_id=%s ORDER BY tour_id',
                                        (batch_id,)).fetchall()
         return [self._clean(row) for row in rows]
 
@@ -266,13 +265,13 @@ class Storage:
         if not values or not values.keys() <= allowed:
             raise ValueError('Invalid batch tour update')
         params = [Jsonb(json_value(v)) if k in JSON_FIELDS else v for k, v in values.items()]
-        self.connection.execute('UPDATE domestic_batch_tours SET ' + ','.join(f'{k}=%s' for k in values)
+        self.connection.execute('UPDATE crawl_batch_tours SET ' + ','.join(f'{k}=%s' for k in values)
                                 + ' WHERE batch_id=%s AND tour_id=%s', (*params, batch_id, tour_id))
 
     def begin_attempt(self, batch_id, tour_id, run_id, reason):
         with self.connection.transaction():
             self.ensure_batch_tour(batch_id, tour_id)
-            self.connection.execute('UPDATE domestic_batch_tours SET selection_reason=%s,'
+            self.connection.execute('UPDATE crawl_batch_tours SET selection_reason=%s,'
                 'attempt_run_ids=attempt_run_ids || %s WHERE batch_id=%s AND tour_id=%s',
                 (reason, Jsonb([run_id]), batch_id, tour_id))
             self._update_tour(tour_id, latest_attempt_run_id=run_id, last_attempt_at=now())
@@ -282,11 +281,11 @@ class Storage:
         current = self.get_tour(tour_id)
         if current['source_tour_id'] and current['source_tour_id'] != snapshot.source_tour_id:
             raise ValueError('Tour identity changed; baseline retained')
-        target = self.connection.execute('SELECT id FROM domestic_tours WHERE source_tour_id=%s '
+        target = self.connection.execute('SELECT id FROM tours WHERE source_tour_id=%s '
             'AND superseded_by_id IS NULL', (snapshot.source_tour_id,)).fetchone()
         target_id = str(target['id']) if target else tour_id
         canonical = tour_url(snapshot.canonical_url)
-        alias = self.connection.execute('SELECT tour_id FROM domestic_tour_urls WHERE url_key=%s', (canonical,)).fetchone()
+        alias = self.connection.execute('SELECT tour_id FROM tour_urls WHERE url_key=%s', (canonical,)).fetchone()
         if alias and str(alias['tour_id']) not in {tour_id, target_id}:
             raise ValueError('Conflicting canonical tour identity')
         if target_id != tour_id:
@@ -296,13 +295,13 @@ class Storage:
             self.update_batch_tour(batch_id, target_id, discovered=source_row['discovered'] or target_row['discovered'],
                 selection_reason=source_row['selection_reason'],
                 attempt_run_ids=list(dict.fromkeys(target_row['attempt_run_ids'] + source_row['attempt_run_ids'])))
-            self.connection.execute('UPDATE domestic_tour_urls SET tour_id=%s WHERE tour_id=%s', (target_id, tour_id))
+            self.connection.execute('UPDATE tour_urls SET tour_id=%s WHERE tour_id=%s', (target_id, tour_id))
             self._update_tour(tour_id, superseded_by_id=target_id)
             self.update_batch_tour(batch_id, tour_id, outcome='merged')
             self._update_tour(target_id, latest_attempt_run_id=current['latest_attempt_run_id'],
                               last_attempt_at=current['last_attempt_at'], is_listed=current['is_listed'],
                               last_seen_batch_id=current['last_seen_batch_id'])
-        self.connection.execute('INSERT INTO domestic_tour_urls(url_key,tour_id,first_seen_at) VALUES (%s,%s,%s) '
+        self.connection.execute('INSERT INTO tour_urls(url_key,tour_id,first_seen_at) VALUES (%s,%s,%s) '
             'ON CONFLICT(url_key) DO UPDATE SET tour_id=EXCLUDED.tour_id', (canonical, target_id, now()))
         self._update_tour(target_id, source_tour_id=snapshot.source_tour_id, canonical_url=canonical)
         return target_id
@@ -325,7 +324,7 @@ class Storage:
             # Captures are serialized; start time stays truthful when recovery finishes an old run now.
             newer = self.connection.execute('SELECT 1 FROM crawl_runs r WHERE r.started_at>%s AND ('
                 'r.id=(SELECT run_id FROM tour_snapshots WHERE id=%s) OR EXISTS ('
-                'SELECT 1 FROM domestic_batch_tours b WHERE b.tour_id=%s '
+                'SELECT 1 FROM crawl_batch_tours b WHERE b.tour_id=%s '
                 "AND b.outcome IN ('changed','unchanged','unavailable','partial','failed') "
                 'AND b.attempt_run_ids ? r.id::text)) LIMIT 1',
                 (run['started_at'], tour['current_snapshot_id'], tour['id'])).fetchone()
@@ -382,9 +381,9 @@ class Storage:
     def _partial_display_snapshot(self, tour):
         row = self.connection.execute('SELECT s.id FROM tour_snapshots s JOIN crawl_runs r ON r.id=s.run_id '
             "WHERE s.status='partial' AND (%s::text IS NULL OR s.source_tour_id=%s) AND ("
-            'EXISTS (SELECT 1 FROM domestic_tour_urls u WHERE u.tour_id=%s '
+            'EXISTS (SELECT 1 FROM tour_urls u WHERE u.tour_id=%s '
             'AND (u.url_key=r.requested_url OR u.url_key=s.canonical_url)) OR '
-            'EXISTS (SELECT 1 FROM domestic_batch_tours b WHERE b.tour_id=%s '
+            'EXISTS (SELECT 1 FROM crawl_batch_tours b WHERE b.tour_id=%s '
             'AND b.attempt_run_ids ? r.id::text) OR r.id=%s) '
             'ORDER BY COALESCE(r.finished_at,r.started_at) DESC,s.parsed_at DESC,s.id DESC LIMIT 1',
             (tour['source_tour_id'] or None, tour['source_tour_id'] or None,
@@ -416,7 +415,7 @@ class Storage:
             return self.get_batch(batch_id)
 
     def pending_batches(self):
-        rows = self.connection.execute("SELECT * FROM domestic_batches WHERE status='running' "
+        rows = self.connection.execute("SELECT * FROM crawl_batches WHERE status='running' "
             "OR export_status='pending' ORDER BY started_at,id").fetchall()
         return [self._clean(row) for row in rows]
 

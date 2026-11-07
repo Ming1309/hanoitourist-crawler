@@ -57,10 +57,37 @@ def test_partial_never_replaces_complete_seed(storage, capture_history):
     assert tour['current_snapshot_id'] == complete.id
 
 
-def test_schema_upgrade_preserves_history(storage, capture_history):
+def test_fresh_schema_has_current_catalogue_names(storage):
+    storage.preflight_incremental()
+    names = {row['relname'] for row in storage.connection.execute(
+        'SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace').fetchall()}
+    assert {'tours', 'tour_urls', 'crawl_batches', 'crawl_batch_tours', 'scheduler_state',
+            'tours_identity', 'tours_due', 'crawl_batches_pending'} <= names
+    assert not any(name.startswith('domestic_') for name in names)
+
+
+def test_schema_reinitialization_preserves_catalogue(storage, capture_history):
+    capture_history()
+    batch, tour = register(storage)
+    storage.freeze_batch(batch, 'complete')
+    receipt = {'schema': 'v4', 'directory': 'exports/domestic/history'}
+    storage.update_batch(batch, export_status='complete', export_manifest=receipt)
+    before = (storage.get_batch(batch), storage.get_tour(tour['id']), storage.batch_tours(batch),
+              storage.tour_aliases(tour['id']))
+    objects = storage.connection.execute(
+        'SELECT oid,relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace ORDER BY oid').fetchall()
+    storage.init_schema()
+    storage.init_schema()
+    assert before == (storage.get_batch(batch), storage.get_tour(tour['id']), storage.batch_tours(batch),
+                      storage.tour_aliases(tour['id']))
+    assert objects == storage.connection.execute(
+        'SELECT oid,relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace ORDER BY oid').fetchall()
+
+
+def test_schema_reinitialization_preserves_history(storage, capture_history):
     run, snapshot = capture_history()
     raw = [(d.id, d.body, d.sha256, d.captured_at) for d in storage.load_raw(run)]
-    storage.connection.execute('DROP TABLE scheduler_state,domestic_batch_tours,domestic_tour_urls,domestic_tours,domestic_batches')
+    storage.connection.execute('DROP TABLE scheduler_state,crawl_batch_tours,tour_urls,tours,crawl_batches')
     storage.init_schema()
     storage.init_schema()
     assert storage.get_snapshot_by_id(snapshot.id).id == snapshot.id

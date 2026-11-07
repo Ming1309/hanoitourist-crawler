@@ -35,7 +35,7 @@ def test_stopped_daily_attempt_is_terminal_and_retryable_when_omitted(
             crawl_domestic(config(tmp_path), storage, discovery=discovery([url], 'partial'), collector_class=StoppedCollector)
     else:
         crawl_domestic(config(tmp_path), storage, discovery=discovery([url], 'partial'), collector_class=StoppedCollector)
-    bid = str(storage.connection.execute('SELECT id FROM domestic_batches ORDER BY started_at DESC LIMIT 1').fetchone()['id'])
+    bid = str(storage.connection.execute('SELECT id FROM crawl_batches ORDER BY started_at DESC LIMIT 1').fetchone()['id'])
     row = storage.batch_tours(bid)[0]
     tour = storage.get_tour(row['tour_id'])
     run_id = row['attempt_run_ids'][0]
