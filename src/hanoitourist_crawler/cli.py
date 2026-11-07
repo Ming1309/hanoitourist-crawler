@@ -24,6 +24,8 @@ def arguments():
     domestic = commands.add_parser('crawl-domestic')
     domestic.add_argument('--headed', action='store_true')
     domestic.add_argument('--output-dir')
+    domestic.add_argument('--url', action='append',
+                          help='Crawl only this tour URL immediately; repeat for multiple; skips discovery and TTL')
     retry = commands.add_parser('retry-domestic', help='Retry explicitly selected frozen detail failures; no discovery')
     retry.add_argument('--source-batch-id', type=lambda v: str(UUID(v)), required=True)
     retry.add_argument('--url', action='append', required=True)
@@ -70,11 +72,15 @@ def main(argv=None):
                 print(f'{key}={path}')
             return {'handled': 0, 'partial': 2, 'busy': 2, 'failed': 1}[result.status]
         if args.command == 'crawl-domestic':
-            result = crawl_domestic(config, storage)
+            result = (crawl_domestic(config, storage, urls=args.url) if args.url
+                      else crawl_domestic(config, storage))
             print(f'batch={result.batch_id or "none"} status={result.status}')
             if result.batch_id:
                 batch = storage.get_batch(result.batch_id)
-                print(f'discovery_terminal={batch["discovery_complete"]} export={batch["export_status"]}')
+                if args.url:
+                    print(f'mode=explicit-target export={batch["export_status"]}')
+                else:
+                    print(f'discovery_terminal={batch["discovery_complete"]} export={batch["export_status"]}')
                 print(' '.join(f'{key}={result.counts.get(key, 0)}' for key in
                     ('new', 'updated', 'unavailable', 'reactivated', 'unchanged', 'skipped', 'partial', 'failed')))
                 for key, path in result.paths.items():

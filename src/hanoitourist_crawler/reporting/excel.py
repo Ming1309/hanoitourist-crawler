@@ -277,7 +277,10 @@ def _batch_workbook(storage, batch, rows, *, delta):
                 schema[name]['rows'].append(values)
     book = Workbook()
     book.remove(book.active)
-    note = f'Batch {batch["id"]}; {"DELTA" if delta else "FULL"}; trạng thái tải={batch["status"]}; dữ liệu theo refs đã freeze.'
+    explicit = any(isinstance(e, dict) and e.get('schema') == 'explicit-target-v1' for e in batch['errors'])
+    mode = 'explicit-target (không discovery, không đánh giá catalogue)' if explicit else 'discovery'
+    note = (f'Batch {batch["id"]}; {mode}; {"DELTA" if delta else "FULL"}; '
+            f'trạng thái tải={batch["status"]}; dữ liệu theo refs đã freeze.')
     for name, sheet in schema.items():
         headers = sheet['headers'] + (extra if name == 'Danh sách tour' else ['ID catalogue'])
         if name == 'Danh sách tour':

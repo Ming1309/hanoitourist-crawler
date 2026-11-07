@@ -12,6 +12,8 @@ from ..models import BatchResult, now
 from .pipeline import collect_run
 from ..acquisition.scope import tour_url
 
+EXPLICIT_CONTEXT = 'explicit-target-v1'
+
 
 def selection_reason(tour, at, days, *, discovered, terminal):
     if not discovered and tour['availability'] == 'unavailable':
@@ -69,8 +71,88 @@ def recover_batches(storage, output_dir, *, batch_id=None):
             pass
 
 
+def crawl_targets(config, storage, urls, *, collector_class=Collector, clock=now):
+    """Crawl explicit tour URLs immediately, with no discovery or TTL selection."""
+    requested = list(dict.fromkeys(tour_url(url) for url in urls))
+    if not requested:
+        raise ValueError('At least one explicit tour URL is required')
+    storage.preflight_incremental()
+    with storage.crawl_lock() as acquired:
+        if not acquired:
+            return BatchResult(None, 'busy')
+        recover_batches(storage, config.export_dir)
+        batch_id = storage.create_batch()
+        context = {'schema': EXPLICIT_CONTEXT, 'mode': 'explicit_target',
+                   'message': 'Explicit-target batch; catalogue coverage not assessed',
+                   'requested_urls': requested, 'selected_at': clock()}
+        storage.update_batch(batch_id, stage='details', errors=[context])
+        deadline = time.monotonic() + config.batch_timeout
+        wall_deadline = time.time() + config.batch_timeout
+        pacer = RequestPacer(config.request_interval)
+        attempted, stopped = set(), None
+        interrupted = False
+        try:
+            for url in requested:
+                tour = storage.register_tour(url, '', batch_id, listed=False)
+                seen = set()
+                while tour['superseded_by_id']:
+                    if tour['id'] in seen:
+                        raise ValueError('Cyclic superseded identity')
+                    seen.add(tour['id'])
+                    tour = storage.get_tour(tour['superseded_by_id'])
+                if tour['id'] in attempted:
+                    continue
+                storage.update_batch_tour(batch_id, tour['id'], selection_reason='requested')
+                remaining = min(deadline - time.monotonic(), wall_deadline - time.time())
+                if remaining <= 0:
+                    stopped = 'Batch budget exceeded; remaining requested tours not attempted'
+                    break
+                run_id = storage.create_run(url)
+                storage.begin_attempt(batch_id, tour['id'], run_id, 'requested')
+                attempted.add(tour['id'])
+                try:
+                    collect_run(replace(config, tour_url=url, run_timeout=min(config.run_timeout, remaining)),
+                                storage, run_id, collector_class=collector_class, pacer=pacer)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    run = storage.get_run(run_id)
+                    if run['capture_status'] == 'running':
+                        storage.update_run(run_id, capture_status='partial' if storage.load_raw(run_id) else 'failed',
+                                           finished_at=clock(),
+                                           errors=run['errors'] + [
+                                               f'Tour capture stopped ({type(exc).__name__}); checkpoints retained'])
+                published = complete_daily(storage, batch_id, tour['id'], run_id)
+                if published is not None:
+                    attempted.add(published)
+        except KeyboardInterrupt:
+            interrupted = True
+        except Exception as exc:
+            stopped = f'Batch stopped ({type(exc).__name__}); committed results retained'
+        # Terminalize only this invocation's pending attempts; batch-wide recovery already ran.
+        for row in storage.batch_tours(batch_id):
+            if row['outcome'] == 'pending' and row['attempt_run_ids']:
+                complete_daily_stopped(storage, batch_id, row['tour_id'], row['attempt_run_ids'][-1], clock=clock)
+        attempted_rows = [r for r in storage.batch_tours(batch_id) if r['attempt_run_ids']]
+        problems = any(r['outcome'] in {'failed', 'partial'} for r in attempted_rows)
+        healthy = bool(attempted) and not problems and not stopped and not interrupted
+        status = 'complete' if healthy else ('partial' if attempted else 'failed')
+        errors = [context] + ([stopped] if stopped else [])
+        batch = storage.freeze_batch(batch_id, status, errors)
+        try:
+            paths = _export(storage, batch_id, config.export_dir)
+        except Exception:
+            paths = {}
+            status = 'failed'
+        if interrupted:
+            raise KeyboardInterrupt
+        return BatchResult(batch_id, status, batch['counts'], paths)
+
+
 def crawl_domestic(config, storage, *, scheduled_for=None, discovery=discover_domestic,
-                   collector_class=Collector, clock=now):
+                   collector_class=Collector, clock=now, urls=None):
+    if urls is not None:
+        return crawl_targets(config, storage, urls, collector_class=collector_class, clock=clock)
     storage.preflight_incremental()
     with storage.crawl_lock() as acquired:
         if not acquired:

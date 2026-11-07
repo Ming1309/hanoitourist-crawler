@@ -153,7 +153,10 @@ def test_cli_formats_mixed_run_errors(monkeypatch, tmp_path, capsys):
 def test_domestic_arguments():
     from hanoitourist_crawler.cli import arguments
     args = arguments().parse_args(['crawl-domestic', '--headed', '--output-dir', 'out'])
-    assert args.headed and args.output_dir == 'out'
+    assert args.headed and args.output_dir == 'out' and args.url is None
+    urls = ['https://hanoitourist.vn/tour-a', 'https://hanoitourist.vn/tour-b']
+    args = arguments().parse_args(['crawl-domestic', '--url', urls[0], '--url', urls[1]])
+    assert args.url == urls
     batch_id = uid()
     assert arguments().parse_args(['export-batch', '--batch-id', batch_id]).batch_id == batch_id
     assert arguments().parse_args(['schedule']).command == 'schedule'
@@ -168,6 +171,40 @@ def test_domestic_exit_codes(monkeypatch, tmp_path, status, code):
     monkeypatch.setattr('hanoitourist_crawler.cli.Storage',lambda *a:fake)
     monkeypatch.setattr('hanoitourist_crawler.cli.crawl_domestic',lambda *a:BatchResult(batch_id,status,{},{}))
     assert main(['crawl-domestic','--output-dir',str(tmp_path)]) == code
+
+
+@pytest.mark.parametrize('urls,expected', [
+    (None, {}),
+    (['https://hanoitourist.vn/a'], {'urls': ['https://hanoitourist.vn/a']}),
+    (['https://hanoitourist.vn/a', 'https://hanoitourist.vn/b'],
+     {'urls': ['https://hanoitourist.vn/a', 'https://hanoitourist.vn/b']}),
+])
+def test_domestic_urls_are_forwarded(monkeypatch, urls, expected):
+    from hanoitourist_crawler.models import BatchResult
+    monkeypatch.setenv('DATABASE_URL', 'postgresql://local/example')
+    monkeypatch.setattr('hanoitourist_crawler.cli.Storage',
+                        lambda *a: SimpleNamespace(close=lambda: None))
+    calls = []
+    monkeypatch.setattr('hanoitourist_crawler.cli.crawl_domestic',
+                        lambda *a, **k: (calls.append((a, k)), BatchResult(None, 'handled'))[1])
+    argv = ['crawl-domestic'] + (sum((['--url', url] for url in urls), []) if urls else [])
+    assert main(argv) == 0
+    assert calls[0][1] == expected
+
+
+def test_explicit_cli_reports_mode(monkeypatch, capsys):
+    from hanoitourist_crawler.models import BatchResult
+    monkeypatch.setenv('DATABASE_URL', 'postgresql://local/example')
+    batch_id = uid()
+    fake = SimpleNamespace(close=lambda: None,
+                           get_batch=lambda *a: {'discovery_complete': False, 'export_status': 'complete'})
+    monkeypatch.setattr('hanoitourist_crawler.cli.Storage', lambda *a: fake)
+    monkeypatch.setattr('hanoitourist_crawler.cli.crawl_domestic',
+                        lambda *a, **k: BatchResult(batch_id, 'partial', {'changed': 1}, {}))
+    assert main(['crawl-domestic', '--url', 'https://hanoitourist.vn/a']) == 2
+    output = capsys.readouterr().out
+    assert 'mode=explicit-target' in output and 'export=complete' in output
+    assert 'discovery_terminal' not in output
 
 
 def test_html_partial_cli_reports_incomplete_discovery(monkeypatch, tmp_path, capsys):
