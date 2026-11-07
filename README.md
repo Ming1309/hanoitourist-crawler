@@ -122,7 +122,17 @@ Scheduler không tự migrate. Dừng bằng `docker compose stop crawler`; khô
 
 Discovery HTML là best-effort nên batch catalogue thường `partial` (exit 2) dù từng tour complete. Complete từng tour không có nghĩa đã lấy đủ toàn catalogue. Crawler kiểm tra robots, không bypass 401/403/CAPTCHA.
 
-## 6. Tests
+## 6. Format
+
+```bash
+.venv/bin/ruff format src tests      # Python
+.venv/bin/ruff format --check src tests
+.venv/bin/sqlfluff lint src/hanoitourist_crawler/persistence/sql   # SQL, dialect PostgreSQL
+```
+
+Prettier không hỗ trợ Python/SQL nên không dùng trong repo này. Code hiện chưa được format sẵn: `ruff format` sẽ đổi khoảng 46 file, còn SQL đang viết nén nên sqlfluff báo lỗi layout; chạy format lần đầu thành một commit riêng.
+
+## 7. Tests
 
 ```bash
 # Unit offline, không cần DB/internet
