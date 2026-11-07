@@ -13,6 +13,8 @@ from ..persistence.storage import Storage
 def latest_slot(at, schedule_time='00:00', schedule_timezone='Asia/Ho_Chi_Minh'):
     if at.utcoffset() is None:
         raise ValueError('Scheduler clock must be timezone aware')
+    if schedule_timezone != 'Asia/Ho_Chi_Minh':
+        raise ValueError('SCHEDULE_TIMEZONE must be Asia/Ho_Chi_Minh')
     zone = ZoneInfo(schedule_timezone)
     local = at.astimezone(zone)
     hour, minute = map(int, schedule_time.split(':'))
@@ -23,6 +25,8 @@ def latest_slot(at, schedule_time='00:00', schedule_timezone='Asia/Ho_Chi_Minh')
 
 
 def schedule(config, *, clock=now, sleeper=time.sleep, storage_factory=Storage, runner=crawl_domestic):
+    if config.schedule_timezone != 'Asia/Ho_Chi_Minh':
+        raise ValueError('SCHEDULE_TIMEZONE must be Asia/Ho_Chi_Minh')
     previous = signal.getsignal(signal.SIGTERM)
 
     def stop(signum, frame):

@@ -3,7 +3,6 @@
 import os
 import math
 import re
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass, fields
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -83,7 +82,5 @@ class Config:
             raise ValueError('DOMESTIC_LISTING_URL must be the domestic scope root')
         if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', self.schedule_time):
             raise ValueError('SCHEDULE_TIME must be HH:MM')
-        try:
-            ZoneInfo(self.schedule_timezone)
-        except (ZoneInfoNotFoundError, ValueError):
-            raise ValueError('Invalid SCHEDULE_TIMEZONE') from None
+        if self.schedule_timezone != 'Asia/Ho_Chi_Minh':
+            raise ValueError('SCHEDULE_TIMEZONE must be Asia/Ho_Chi_Minh')

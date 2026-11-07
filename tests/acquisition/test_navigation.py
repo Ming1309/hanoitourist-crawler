@@ -196,9 +196,9 @@ def test_post_redirect_does_not_convert_or_forward_body(chromium,http_servers):
 
 @pytest.mark.browser
 def test_discovery_redirect_cannot_escape_its_listing_authority(chromium,http_servers):
-    from hanoitourist_crawler.acquisition.discovery import DiscoveryCollector
+    from hanoitourist_crawler.acquisition.discovery import HTMLDiscoveryCollector
     server=http_servers({('GET','/start'):(302,{'Location':'/tour-nuoc-ngoai'},b'redirect')})
-    capture,context=local_capture(chromium,server,cls=DiscoveryCollector)
+    capture,context=local_capture(chromium,server,cls=HTMLDiscoveryCollector)
     try:
         with pytest.raises(Exception): navigate(capture,server.url+'/start')
         assert [h['path'] for h in server.hits]==['/start']

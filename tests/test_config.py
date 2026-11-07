@@ -4,6 +4,13 @@ import pytest
 from hanoitourist_crawler.config import Config
 
 
+@pytest.mark.parametrize('zone', ['UTC', 'Europe/Berlin', 'Asia/Saigon', 'Etc/GMT-7'])
+def test_only_vietnam_scheduler_timezone_is_supported(monkeypatch, zone):
+    monkeypatch.setenv('SCHEDULE_TIMEZONE', zone)
+    with pytest.raises(ValueError, match='Asia/Ho_Chi_Minh'):
+        Config.load({'database_url': 'unused'}, dotenv=False)
+
+
 def test_precedence(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://local/example")
     monkeypatch.setenv("EXPORT_DIR", "from-env")

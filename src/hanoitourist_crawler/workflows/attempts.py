@@ -70,19 +70,31 @@ def complete_retry(storage, batch_id, target, run_id, *, attempted, selected):
                 return None
 
 
+def _complete_stopped(storage, batch_id, tour_id, run_id, *, clock, capture_error, attempt_error):
+    run = storage.get_run(run_id)
+    if run['capture_status'] == 'running':
+        storage.update_run(run_id, capture_status='failed', finished_at=clock(),
+                           errors=run['errors'] + [capture_error])
+    storage.update_batch_tour(batch_id, tour_id, outcome='failed', errors=[attempt_error])
+    storage._update_tour(tour_id, requires_refresh=True)
+
+
+def complete_daily_stopped(storage, batch_id, tour_id, run_id, *, clock=now):
+    """Fail this invocation's stopped daily attempt without parsing or publication."""
+    _complete_stopped(storage, batch_id, tour_id, run_id, clock=clock,
+                      capture_error='Daily crawl interrupted; checkpoints retained',
+                      attempt_error='Daily crawl stopped before publication')
+
+
 def complete_retry_stopped(storage, batch_id, tour_id, run_id, *, clock=now):
     """Fail a pending retry selected by its caller; never parse or publish.
 
     The caller holds the crawl lock and supplies its latest attempt reference.
     Preserve independent checkpoint writes rather than introducing a transaction.
     """
-    run = storage.get_run(run_id)
-    if run['capture_status'] == 'running':
-        storage.update_run(run_id, capture_status='failed', finished_at=clock(),
-                           errors=run['errors'] + ['Scoped retry interrupted; checkpoints retained'])
-    storage.update_batch_tour(batch_id, tour_id, outcome='failed',
-                              errors=['Scoped retry stopped before atomic publication'])
-    storage._update_tour(tour_id, requires_refresh=True)
+    _complete_stopped(storage, batch_id, tour_id, run_id, clock=clock,
+                      capture_error='Scoped retry interrupted; checkpoints retained',
+                      attempt_error='Scoped retry stopped before atomic publication')
 
 
 def complete_recovery(storage, batch_id, tour_id, run_id):

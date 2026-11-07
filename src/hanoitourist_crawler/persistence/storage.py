@@ -315,6 +315,28 @@ class Storage:
                 return tour_id
             run = self.get_run(run_id)
             snapshot = self.get_snapshot(run_id)
+            tour = self.get_tour(tour_id)
+            while tour['superseded_by_id']:
+                tour = self.get_tour(tour['superseded_by_id'])
+            if snapshot and snapshot.status == 'complete' and run['capture_status'] == 'complete':
+                if tour['source_tour_id'] and tour['source_tour_id'] != snapshot.source_tour_id:
+                    raise ValueError('Tour identity changed; baseline retained')
+                tour = self.get_tour_by_source_id(snapshot.source_tour_id) or tour
+            # Captures are serialized; start time stays truthful when recovery finishes an old run now.
+            newer = self.connection.execute('SELECT 1 FROM crawl_runs r WHERE r.started_at>%s AND ('
+                'r.id=(SELECT run_id FROM tour_snapshots WHERE id=%s) OR EXISTS ('
+                'SELECT 1 FROM domestic_batch_tours b WHERE b.tour_id=%s '
+                "AND b.outcome IN ('changed','unchanged','unavailable','partial','failed') "
+                'AND b.attempt_run_ids ? r.id::text)) LIMIT 1',
+                (run['started_at'], tour['current_snapshot_id'], tour['id'])).fetchone()
+            if newer:
+                self.update_batch_tour(batch_id, tour_id, outcome='skipped', change_kinds=[],
+                    result_snapshot_id=tour['current_snapshot_id'], result_availability=tour['availability'],
+                    result_fingerprint=tour['fingerprint'],
+                    errors=run['errors'] + ['Stale attempt ignored; newer published state retained'])
+                if tour_id != tour['id']:
+                    self._update_tour(tour_id, requires_refresh=True)
+                return tour['id']
             navigation = run.get('manifest', {}).get('navigation', [])
             terminal = navigation[-1] if navigation else {}
             raw = {d.id: d for d in self.load_raw(run_id)}

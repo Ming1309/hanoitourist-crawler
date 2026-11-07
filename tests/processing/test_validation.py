@@ -16,6 +16,46 @@ def run_for(snapshot, **changes):
     return result
 
 
+@pytest.mark.parametrize('kind,role,scoped', [
+    ('dom', 'tour_state', True), ('http_document', 'tour', True),
+    ('dom', 'tour_state', False), ('http_document', 'tour', False)])
+def test_empty_schedule_marker_requires_scope_and_includes_dom(documents, kind, role, scoped):
+    doc = documents[0]
+    soup = BeautifulSoup(doc.body, 'html.parser')
+    soup.select_one('#lichkhoihanh table.footable > tbody').clear()
+    source = replace(doc, body=str(soup).encode())
+    marker = BeautifulSoup('<div class="view-empty">No departures</div>', 'html.parser').div
+    soup.select_one('#lichkhoihanh' if scoped else '#videos').append(marker)
+    empty = replace(source, id='empty-observation', sequence=99, kind=kind, role=role,
+                    body=str(soup).encode())
+    snapshot = parse([source, empty], doc.run_id)
+    assert validate(snapshot, [source, empty], run_for(snapshot)).status == ('complete' if scoped else 'partial')
+
+
+@pytest.mark.parametrize('http_status', [200, 404])
+def test_ajax_empty_marker_is_parsed_only_from_successful_response(documents, http_status):
+    import json
+    doc = documents[0]
+    soup = BeautifulSoup(doc.body, 'html.parser')
+    soup.select_one('#lichkhoihanh table.footable > tbody').clear()
+    source = replace(doc, body=str(soup).encode())
+    commands = [{'command': 'insert', 'data': '<div class="view-id-lich"><div class="view-empty">No departures</div></div>'}]
+    ajax = replace(doc, id='empty-ajax', sequence=99, kind='ajax', role='schedule',
+                   body=json.dumps(commands).encode(), content_type='application/json', http_status=http_status)
+    snapshot = parse([source, ajax], doc.run_id)
+    assert validate(snapshot, [source, ajax], run_for(snapshot)).status == ('complete' if http_status == 200 else 'partial')
+
+
+def test_script_text_cannot_prove_empty_schedule(documents):
+    doc = documents[0]
+    soup = BeautifulSoup(doc.body, 'html.parser')
+    soup.select_one('#lichkhoihanh table.footable > tbody').clear()
+    soup.select_one('#lichkhoihanh').append(BeautifulSoup('<script>const marker = "view-empty";</script>', 'html.parser'))
+    changed = replace(doc, body=str(soup).encode())
+    snapshot = parse([changed], doc.run_id)
+    assert validate(snapshot, [changed], run_for(snapshot)).status == 'partial'
+
+
 def test_complete_and_empty_sections(documents):
     snapshot = parse(documents, documents[0].run_id)
     assert validate(snapshot, documents, run_for(snapshot)).status == 'complete'

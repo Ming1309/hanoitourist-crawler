@@ -22,7 +22,7 @@ LIMIT = 256
 def safe_url(value):
     try:
         u = urlsplit(str(value))
-        if u.scheme not in {'https', 'http'}:
+        if u.scheme and u.scheme not in {'https', 'http'}:
             return '[redacted-url]'
         return urlunsplit((u.scheme, u.hostname or '', u.path[:2048], '', ''))
     except ValueError:
@@ -153,7 +153,8 @@ def atomic_private(path, body):
 
 
 def bounded_text(value):
-    value = re.sub(r'https?://[^\s<>\"\']+', lambda match: safe_url(match[0]), str(value))
+    value = re.sub(r'(?<=:price:)[^\s<>\"\']+|https?://[^\s<>\"\']+|//[^\s<>\"\']+|/(?!/)[^\s<>\"\']+|(?<![\w/])[\w.-]+/[^\s<>\"\']+',
+                   lambda match: safe_url(match[0]), str(value), flags=re.I)
     value = ''.join(c for c in value if c >= ' ' or c == '\n')
     return value[:2048]
 
@@ -163,7 +164,17 @@ def sanitized(value):
     if isinstance(value, str):
         return bounded_text(value)
     if isinstance(value, dict):
-        return {bounded_text(k): sanitized(v) for k, v in value.items()}
+        result = {}
+        for k, v in value.items():
+            key = bounded_text(k)
+            suffix = 1
+            while key in result:
+                suffix += 1
+                key = f'{bounded_text(k)} [{suffix}]'
+            if isinstance(v, str) and (k == 'url' or str(k).endswith(('_url', '_href', '_href_raw'))):
+                v = safe_url(v)
+            result[key] = sanitized(v)
+        return result
     if isinstance(value, list):
         return [sanitized(v) for v in value]
     return value

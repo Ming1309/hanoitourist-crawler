@@ -109,16 +109,18 @@ def _sheet(book, name, note, headers, rows, widths, hidden=(), wrap=(), money=()
     return ws
 
 
-def _workbook(snapshot, run):
+def _snapshot_rows(snapshot, run):
     s = snapshot
-    book = Workbook()
-    book.remove(book.active)
+    sheets = {}
+    def sheet(name, note, headers, rows, widths, hidden=(), wrap=(), money=(), dates=(), urls=()):
+        sheets[name] = dict(note=note, headers=headers, rows=rows, widths=widths,
+                            hidden=hidden, wrap=wrap, money=money, dates=dates, urls=urls)
     keys = [s.source_tour_id, s.id, s.run_id]
     summary = [[s.title, s.origin_text, s.duration_text, _amount(s.promotional_price),
                 s.promotional_price_raw, len({d.source_schedule_id for d in s.departures}),
                 s.status, '\n'.join(s.warnings), _local(run['started_at']), s.canonical_url,
                 s.review_summary, s.sidebar_text, s.parser_version, *keys]]
-    _sheet(book, 'Danh sách tour', 'Một dòng / snapshot. Giá quảng bá không thay giá từng lịch; giờ Việt Nam.',
+    sheet('Danh sách tour', 'Một dòng / snapshot. Giá quảng bá không thay giá từng lịch; giờ Việt Nam.',
            ['Tên tour', 'Khởi hành từ', 'Thời lượng', 'Giá quảng bá', 'Giá — nguyên văn',
             'Số lịch', 'Trạng thái', 'Cảnh báo', 'Crawl lúc (VN)', 'URL nguồn',
             'Đánh giá nguồn', 'Thông tin sidebar', 'Parser version', *KEY_HEADERS],
@@ -132,17 +134,17 @@ def _workbook(snapshot, run):
         variants[section.key] += 1
         contents.append([s.title, LABELS.get(section.key, section.key), section.title, section.state,
                          variants[section.key], section.content_text, section.id, *keys])
-    _sheet(book, 'Nội dung tour', 'Mỗi mục / biến thể một dòng. Nội dung đầy đủ trong một ô; không chia đoạn.',
+    sheet('Nội dung tour', 'Mỗi mục / biến thể một dòng. Nội dung đầy đủ trong một ô; không chia đoạn.',
            ['Tên tour', 'Mục nội dung', 'Tiêu đề nguồn', 'Trạng thái mục', 'Biến thể',
             'Nội dung đầy đủ', 'ID section', *KEY_HEADERS], contents,
            [38, 27, 32, 18, 12, 120, 38, 18, 38, 38], hidden=(7, 8, 9, 10), wrap=(1, 2, 3, 6))
     days = [[s.title, d.ordinal, d.label, d.content_text, ' | '.join(d.transport_labels), d.id, *keys]
             for d in sorted(s.days, key=lambda x: (x.ordinal, x.id))]
-    _sheet(book, 'Lịch trình', 'Mỗi ngày / biến thể một dòng. Ô dài giữ toàn bộ nội dung; đọc thêm ở thanh công thức.',
+    sheet('Lịch trình', 'Mỗi ngày / biến thể một dòng. Ô dài giữ toàn bộ nội dung; đọc thêm ở thanh công thức.',
            ['Tên tour', 'Ngày thứ', 'Tiêu đề ngày', 'Nội dung ngày đầy đủ',
             'Phương tiện / nhãn nguồn', 'ID ngày', *KEY_HEADERS], days,
            [38, 12, 52, 120, 34, 38, 18, 38, 38], hidden=(6, 7, 8, 9), wrap=(1, 3, 4, 5))
-    departures, prices, shared_rows = [], [], []
+    departures, prices = [], []
     for d in s.departures:
         departures.append([s.title, d.source_schedule_id, _local(d.departure_at), d.departure_raw,
                            d.seats, d.seats_raw, _amount(d.price_from), d.price_from_raw, d.currency,
@@ -153,24 +155,18 @@ def _workbook(snapshot, run):
                            _amount(c.amount), c.raw_value, c.currency,
                            'Có — không nhân giá' if c.colspan > 1 else 'Không',
                            c.rowspan, c.colspan, c.row_index, c.column_index, c.id, d.id, *keys])
-            if c.colspan > 1:
-                shared_rows.append(4 + len(prices))
-    _sheet(book, 'Lịch khởi hành', 'Một dòng / observation; giữ xung đột và ngày thiếu. Booking chỉ tham chiếu.',
+    sheet('Lịch khởi hành', 'Một dòng / observation; giữ xung đột và ngày thiếu. Booking chỉ tham chiếu.',
            ['Tên tour', 'ID lịch', 'Khởi hành (VN)', 'Ngày — nguyên văn', 'Chỗ còn', 'Chỗ — nguyên văn',
             'Giá từ', 'Giá — nguyên văn', 'Tiền tệ', 'Đặc điểm', 'Booking — tham chiếu',
             'Quan sát lúc (VN)', 'ID observation', *KEY_HEADERS], departures,
            [38, 13, 23, 24, 12, 18, 19, 24, 12, 40, 65, 23, 38, 18, 38, 38],
            hidden=(13, 14, 15, 16), wrap=(1, 8, 10, 11), money=(7,), dates=(3, 12))
-    ws = _sheet(book, 'Giá chi tiết', 'Một dòng / ô giá. Ô chung tô vàng, không nhân giá; 0đ không suy diễn miễn phí.',
+    sheet('Giá chi tiết', 'Một dòng / ô giá. Ô chung tô vàng, không nhân giá; 0đ không suy diễn miễn phí.',
                 ['Tên tour', 'ID lịch', 'Khởi hành (VN)', 'Ngày — nguyên văn', 'Loại giá', 'Nhóm tuổi',
                  'Nhóm áp dụng', 'Số tiền', 'Giá — nguyên văn', 'Tiền tệ', 'Ô chung', 'Rowspan', 'Colspan',
                  'Dòng nguồn', 'Cột nguồn', 'ID ô giá', 'ID observation', *KEY_HEADERS], prices,
                 [38, 13, 23, 24, 28, 26, 65, 19, 23, 12, 25, 12, 12, 13, 13, 38, 38, 18, 38, 38],
                 hidden=tuple(range(12, 21)), wrap=(1, 5, 6, 7, 9, 11), money=(8,), dates=(3,))
-    for ri in shared_rows:
-        for cell in ws[ri][:11]:
-            cell.fill = PatternFill('solid', fgColor='FFF3D6')
-        ws.cell(ri, 11).comment = Comment('Một ô nguồn gộp nhiều cột; không nhân số tiền.', 'Đối soát')
     media = [[s.title, m.role, LABELS.get(m.section_key, m.section_key), m.day_ordinal,
               m.caption or m.alt, m.url, m.alt, m.original_url, m.id, *keys] for m in s.media]
     links = defaultdict(set)
@@ -182,13 +178,12 @@ def _workbook(snapshot, run):
     for (url, label), contexts in sorted(links.items()):
         media.append([s.title, 'Booking (tham chiếu)' if '/booking' in urlsplit(url).path else 'Link nội dung',
                       ' | '.join(sorted(contexts)), None, label, url, '', '', '', *keys])
-    _sheet(book, 'Ảnh và link', 'Chỉ URL, không tải ảnh. Link trùng nhãn/đích được gom; booking không hyperlink.',
+    sheet('Ảnh và link', 'Chỉ URL, không tải ảnh. Link trùng nhãn/đích được gom; booking không hyperlink.',
            ['Tên tour', 'Loại', 'Thuộc mục', 'Ngày thứ', 'Mô tả', 'URL', 'Alt ảnh',
             'URL nguyên văn', 'ID media', *KEY_HEADERS], media,
            [38, 25, 32, 12, 45, 85, 45, 55, 38, 18, 38, 38],
            hidden=(8, 9, 10, 11, 12), wrap=(1, 2, 3, 5, 6, 7), urls=(6,))
-    book.active = 0
-    return book
+    return sheets
 
 
 def export_excel(storage, run_id, output_dir, version=None):
@@ -214,17 +209,23 @@ def export_excel(storage, run_id, output_dir, version=None):
     return path, snapshot.status
 
 
-def _snapshot_rows(snapshot, run):
-    book = _workbook(snapshot, run)
-    try:
-        return {ws.title: {
-            'headers': [c.value for c in ws[4]],
-            'rows': [list(row) for row in ws.iter_rows(min_row=5, values_only=True)] if ws.max_row > 4 else [],
-            'widths': [ws.column_dimensions[get_column_letter(ci)].width for ci in range(1, ws.max_column + 1)],
-            'hidden': [ci for ci in range(1, ws.max_column + 1) if ws.column_dimensions[get_column_letter(ci)].hidden],
-        } for ws in book}
-    finally:
-        book.close()
+def _highlight_shared_prices(ws, rows):
+    for ri, values in enumerate(rows, 5):
+        if values[10] == 'Có — không nhân giá':
+            for cell in ws[ri][:11]:
+                cell.fill = PatternFill('solid', fgColor='FFF3D6')
+            ws.cell(ri, 11).comment = Comment('Một ô nguồn gộp nhiều cột; không nhân số tiền.', 'Đối soát')
+
+
+def _workbook(snapshot, run):
+    book = Workbook()
+    book.remove(book.active)
+    for name, sheet in _snapshot_rows(snapshot, run).items():
+        ws = _sheet(book, name, **sheet)
+        if name == 'Giá chi tiết':
+            _highlight_shared_prices(ws, sheet['rows'])
+    book.active = 0
+    return book
 
 
 def _display_snapshot(storage, row):
@@ -282,7 +283,7 @@ def _batch_workbook(storage, batch, rows, *, delta):
         if name == 'Danh sách tour':
             headers[6] = 'Chất lượng dữ liệu'
         widths = sheet['widths'] + ([18, 24, 16, 28, 24, 55, 38] if name == 'Danh sách tour' else [38])
-        hidden = sheet['hidden'] + [len(headers)]
+        hidden = [*sheet['hidden'], len(headers)]
         money = [i for i, h in enumerate(headers, 1) if h in {'Giá quảng bá', 'Giá từ', 'Số tiền'}]
         dates = [i for i, h in enumerate(headers, 1) if h in {'Crawl lúc (VN)', 'Khởi hành (VN)',
                   'Quan sát lúc (VN)', 'Kiểm tra thành công (VN)'}]
@@ -290,11 +291,7 @@ def _batch_workbook(storage, batch, rows, *, delta):
         ws = _sheet(book, name, note, headers, sheet['rows'], widths, hidden=hidden,
                     wrap=tuple(i for i in range(1, len(headers) + 1) if i not in hidden), money=money, dates=dates, urls=urls)
         if name == 'Giá chi tiết':
-            for ri, values in enumerate(sheet['rows'], 5):
-                if values[10] == 'Có — không nhân giá':
-                    for cell in ws[ri][:11]:
-                        cell.fill = PatternFill('solid', fgColor='FFF3D6')
-                    ws.cell(ri, 11).comment = Comment('Một ô nguồn gộp nhiều cột; không nhân số tiền.', 'Đối soát')
+            _highlight_shared_prices(ws, sheet['rows'])
     journal = [[batch['id'], 'batch', batch['status'], '', '', json.dumps(batch['counts'], ensure_ascii=False),
                 '\n'.join(error_message(e) for e in batch['errors'])]]
     journal += [[batch['id'], row['tour_id'], row['outcome'], row['selection_reason'],

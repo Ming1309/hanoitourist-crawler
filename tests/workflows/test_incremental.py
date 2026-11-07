@@ -15,6 +15,44 @@ from hanoitourist_crawler.workflows.pipeline import parse_run
 NEW_URL = 'https://hanoitourist.vn/new-tour'
 
 
+@pytest.mark.postgres
+@pytest.mark.parametrize('failure', [KeyboardInterrupt, RuntimeError])
+@pytest.mark.parametrize('has_baseline', [False, True])
+def test_stopped_daily_attempt_is_terminal_and_retryable_when_omitted(
+        storage, capture_history, documents, tmp_path, failure, has_baseline):
+    from hanoitourist_crawler.workflows.retry import select_targets
+    baseline = capture_history(at=now() - timedelta(days=8))[1] if has_baseline else None
+    url = DEFAULT_TOUR_URL if baseline else NEW_URL
+    class StoppedCollector:
+        def __init__(self, cfg, repository, run_id, **kwargs):
+            self.storage, self.run_id = repository, run_id
+        def collect(self):
+            self.storage.append_raw(RawDocument(self.run_id, 1, 'http_document', 'tour', 'initial', url, b'checkpoint'))
+            self.storage.update_run(self.run_id, capture_status='partial', finished_at=now())
+            raise failure()
+    if failure is KeyboardInterrupt:
+        with pytest.raises(KeyboardInterrupt):
+            crawl_domestic(config(tmp_path), storage, discovery=discovery([url], 'partial'), collector_class=StoppedCollector)
+    else:
+        crawl_domestic(config(tmp_path), storage, discovery=discovery([url], 'partial'), collector_class=StoppedCollector)
+    bid = str(storage.connection.execute('SELECT id FROM domestic_batches ORDER BY started_at DESC LIMIT 1').fetchone()['id'])
+    row = storage.batch_tours(bid)[0]
+    tour = storage.get_tour(row['tour_id'])
+    run_id = row['attempt_run_ids'][0]
+    assert row['outcome'] == 'failed' and tour['requires_refresh']
+    assert tour['current_snapshot_id'] == (baseline.id if baseline else None)
+    assert storage.get_run(run_id)['parse_status'] == 'pending' and storage.get_snapshot(run_id) is None
+    assert storage.get_batch(bid)['export_status'] == 'complete'
+    assert select_targets(storage, bid, [url])[0]['skip_reason'] is None
+    frozen = storage.batch_tours(bid)
+    calls = []
+    next_batch = crawl_domestic(config(tmp_path), storage, discovery=discovery([], 'partial'),
+                               collector_class=collector(documents, calls=calls))
+    assert calls == [url] and not storage.get_tour(tour['id'])['requires_refresh']
+    assert storage.batch_tours(next_batch.batch_id)[0]['selection_reason'] == 'retry'
+    assert storage.batch_tours(bid) == frozen
+
+
 def discovery(urls, status='complete'):
     def run(config, storage, run_id, **kwargs):
         storage.update_run(run_id, capture_status=status, finished_at=now())

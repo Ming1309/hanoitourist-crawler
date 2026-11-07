@@ -8,6 +8,17 @@ from hanoitourist_crawler.models import BatchResult
 from hanoitourist_crawler.workflows.scheduler import latest_slot, schedule
 
 
+@pytest.mark.parametrize('zone', ['UTC', 'Europe/Berlin', 'Asia/Saigon'])
+def test_unsupported_timezone_rejected_by_direct_scheduler_calls(zone):
+    at = datetime(2026, 3, 29, 1, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match='Asia/Ho_Chi_Minh'):
+        latest_slot(at, '02:30', zone)
+    def forbidden(*args, **kwargs):
+        pytest.fail('Unsupported timezone must be rejected before opening a database')
+    with pytest.raises(ValueError, match='Asia/Ho_Chi_Minh'):
+        schedule(Config(schedule_timezone=zone), storage_factory=forbidden)
+
+
 def test_vietnam_midnight_in_utc():
     at = datetime(2026,10,6,17,0,tzinfo=timezone.utc)
     assert latest_slot(at) == at

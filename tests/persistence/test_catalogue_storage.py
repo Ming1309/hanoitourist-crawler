@@ -16,6 +16,29 @@ def register(storage):
     return batch, tour
 
 
+def test_stale_alias_recovery_does_not_overwrite_active_identity(storage, capture_history):
+    from datetime import timedelta
+    from hanoitourist_crawler.workflows.attempts import complete_recovery
+    _, baseline = capture_history(at=now() - timedelta(days=3))
+    seed, canonical = register(storage)
+    storage.freeze_batch(seed, 'complete')
+    abandoned = storage.create_batch()
+    alias = 'https://hanoitourist.vn/old-alias'
+    candidate = storage.register_tour(alias, 'Alias', abandoned)
+    old_run, _ = capture_history(url=alias, at=now() - timedelta(days=2))
+    storage.begin_attempt(abandoned, candidate['id'], old_run, 'new')
+    later = storage.create_batch()
+    fresh_run, fresh = capture_history(price='7,690,000')
+    storage.begin_attempt(later, canonical['id'], fresh_run, 'due')
+    storage.apply_attempt(later, canonical['id'], fresh_run)
+    current = storage.get_tour(canonical['id'])
+    assert current['current_snapshot_id'] == fresh.id != baseline.id
+    complete_recovery(storage, abandoned, candidate['id'], old_run)
+    assert storage.get_tour(canonical['id']) == current
+    assert storage.get_tour(candidate['id'])['requires_refresh']
+    assert storage.batch_tours(abandoned)[0]['change_kinds'] == []
+
+
 def test_seed_uses_capture_time_not_replay(storage, capture_history):
     at = now() - timedelta(days=2)
     run, snapshot = capture_history(at=at)

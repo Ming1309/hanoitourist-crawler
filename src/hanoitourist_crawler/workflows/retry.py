@@ -12,7 +12,7 @@ from .attempts import complete_retry, complete_retry_stopped
 from ..acquisition.collector import Collector, RequestPacer
 from ..reporting.diagnostics import SCHEMA, classify, observe, private_dir, safe_url, write_report
 from .incremental import _export
-from ..models import BatchResult, json_value, now, uid
+from ..models import BatchResult, now, uid
 from .pipeline import collect_run
 from ..acquisition.scope import tour_url
 from ..acquisition.selectors import ROOT

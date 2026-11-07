@@ -4,7 +4,7 @@ import time
 from dataclasses import replace
 from datetime import timedelta
 
-from .attempts import complete_daily, complete_recovery
+from .attempts import complete_daily, complete_daily_stopped, complete_recovery
 from ..acquisition.collector import Collector, RequestPacer
 from ..config import DEFAULT_TOUR_URL
 from ..acquisition.discovery import discover_domestic
@@ -156,6 +156,9 @@ def crawl_domestic(config, storage, *, scheduled_for=None, discovery=discover_do
         except Exception as exc:
             errors.append(f'Batch stopped ({type(exc).__name__}); committed checkpoints retained')
             status = 'partial' if storage.batch_tours(batch_id) else 'failed'
+        for row in storage.batch_tours(batch_id):
+            if row['outcome'] == 'pending' and row['attempt_run_ids']:
+                complete_daily_stopped(storage, batch_id, row['tour_id'], row['attempt_run_ids'][-1])
         batch = storage.freeze_batch(batch_id, status, errors)
         try:
             paths = _export(storage, batch_id, config.export_dir)

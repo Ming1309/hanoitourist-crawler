@@ -10,6 +10,40 @@ from hanoitourist_crawler.processing.parser import parse
 from tests.conftest import FIXTURES
 
 
+@pytest.mark.parametrize('attribute', ['alt', 'title'])
+def test_gallery_metadata_variants_are_not_discarded(documents, attribute):
+    from hanoitourist_crawler.processing.fingerprint import fingerprint
+    doc = documents[0]
+    soup = BeautifulSoup(doc.body, 'html.parser')
+    image = soup.select_one('.view-tva-div img')
+    image[attribute] = 'Old description'
+    first = replace(doc, body=str(soup).encode())
+    image[attribute] = 'New description'
+    second = replace(first, id='changed-metadata', sequence=99, body=str(soup).encode())
+    result = parse([first, second], doc.run_id)
+    records = [m for m in result.media if m.original_url == image['src']]
+    values = {m.alt if attribute == 'alt' else m.caption for m in records}
+    assert {'Old description', 'New description'} <= values
+    assert fingerprint(result) != fingerprint(parse([first], doc.run_id))
+    assert all(len(m.provenance) == 1 for m in records)
+
+
+@pytest.mark.parametrize('attribute,value', [('data-src', '/lazy.jpg'),
+    ('srcset', '/small.jpg 1x, /large.jpg 2x'),
+    ('data-srcset', '/small.jpg 1x, /large.jpg 2x')])
+def test_lazy_media_provenance_locates_actual_source_element(documents, attribute, value):
+    doc = documents[0]
+    soup = BeautifulSoup(doc.body, 'html.parser')
+    image = soup.select_one('.view-tva-div img')
+    image[attribute] = value
+    result = parse([replace(doc, body=str(soup).encode())], doc.run_id)
+    for media in result.media:
+        if media.original_url in {'/lazy.jpg', '/small.jpg', '/large.jpg'}:
+            located = soup.select(media.provenance[0]['locator'])
+            assert located == [image]
+    assert any(m.original_url == value.split()[0] for m in result.media)
+
+
 def test_full_fixture(documents):
     expected = json.loads((FIXTURES / 'expected_snapshot.json').read_text())
     snapshot = parse(documents, documents[0].run_id)

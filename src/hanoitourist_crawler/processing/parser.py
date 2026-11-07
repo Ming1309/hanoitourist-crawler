@@ -9,7 +9,7 @@ from urllib.parse import urljoin, urlsplit
 from bs4 import BeautifulSoup, Tag
 
 from .. import PARSER_VERSION
-from ..models import Day, Departure, Media, PriceCell, Section, Snapshot, json_value
+from ..models import Day, Departure, Media, PriceCell, Section, Snapshot
 from .normalize import departure_time, integer, money, text
 from ..acquisition.selectors import ROOT, SCHEDULE_ID_PATTERN, SECTIONS, SIDEBAR, TITLE
 
@@ -55,13 +55,17 @@ def _locator(node):
     return ' > '.join(reversed(parts))
 
 
-def _schedule_rows(soup):
+def _schedule_scopes(soup):
     root = soup.select_one(ROOT)
     scopes = [root.select_one('#lichkhoihanh')] if root and root.select_one('#lichkhoihanh') else []
     scopes += soup.select('[role=dialog]:has(.view-id-lich)')
     if not root and not scopes:
         scopes = [s for s in soup.select('.view-id-lich') if not s.find_parent(class_='view-id-lich')]
-    for scope in scopes:
+    return scopes
+
+
+def _schedule_rows(soup):
+    for scope in _schedule_scopes(soup):
         for ti, table in enumerate(scope.select('table.footable'), 1):
             if table.find_parent('table'):
                 continue
@@ -322,8 +326,8 @@ def _media(snapshot, root, document, prefix):
             if not url.startswith(('https://', 'http://')):
                 continue
             item = Media(role, url, raw, node.get('alt', ''), node.get('title', ''), index, section, day_number,
-                         [evidence(document, f'{ROOT} {node.name}[src="{raw}"]', prefix)])
-            _merge(snapshot.media, item, lambda m: (m.role, m.url, m.day_ordinal))
+                         [evidence(document, _locator(node), prefix)])
+            _merge(snapshot.media, item, lambda m: (m.role, m.url, m.day_ordinal, m.alt, m.caption))
 
 
 def _departure(snapshot, row, record, document, prefix):

@@ -24,6 +24,26 @@ def staged_attempt(storage, documents):
     return batch, target, run
 
 
+def test_stopped_daily_running_capture_keeps_raw_and_never_parses_or_publishes(storage, documents, monkeypatch):
+    from hanoitourist_crawler.workflows.attempts import complete_daily_stopped
+    batch, target, run = staged_attempt(storage, documents)
+    storage.update_run(run, capture_status='running', finished_at=None, errors=['Checkpoint'])
+    before = storage.load_raw(run)
+    finished = now()
+    def forbidden(*args, **kwargs):
+        pytest.fail('Stopped daily capture must not parse or publish')
+    monkeypatch.setattr('hanoitourist_crawler.workflows.pipeline.parse_run', forbidden)
+    monkeypatch.setattr(storage, 'apply_attempt', forbidden)
+    complete_daily_stopped(storage, batch, target['tour_id'], run, clock=lambda: finished)
+    saved = storage.get_run(run)
+    assert saved['capture_status'] == 'failed' and saved['finished_at'] == finished
+    assert saved['parse_status'] == 'pending'
+    assert saved['errors'] == ['Checkpoint', 'Daily crawl interrupted; checkpoints retained']
+    assert storage.get_snapshot(run) is None and storage.load_raw(run) == before
+    assert storage.batch_tours(batch)[0]['outcome'] == 'failed'
+    assert storage.get_tour(target['tour_id'])['requires_refresh']
+
+
 def retry(storage, batch, target, run):
     return complete_retry(storage, batch, target, run,
                           attempted={target['tour_id']}, selected={target['tour_id']: target})

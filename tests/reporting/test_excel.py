@@ -26,6 +26,42 @@ def values(ws, header):
     return [ws.cell(ri, column).value for ri in range(5, ws.max_row + 1)]
 
 
+def test_batch_builds_only_output_workbooks_and_preserves_legacy_values(excel_storage, monkeypatch):
+    from hanoitourist_crawler.reporting import excel
+    s = excel_storage.snapshot
+    legacy = excel._workbook(s, excel_storage.get_run(s.run_id))
+    expected = {ws.title: [list(row) for row in ws.iter_rows(min_row=5, values_only=True)] for ws in legacy}
+    legacy.close()
+    state = {'current_snapshot_id': s.id, 'source_tour_id': s.source_tour_id,
+             'listing_title': s.title, 'canonical_url': s.canonical_url, 'availability': 'available',
+             'availability_reason': '', 'is_listed': True, 'last_successful_check_at': None}
+    row = {'tour_id': 'catalogue', 'frozen_state': state, 'display_snapshot_id': s.id,
+           'change_kinds': ['new'], 'errors': [], 'outcome': 'changed',
+           'selection_reason': 'new', 'attempt_run_ids': [s.run_id]}
+    storage = SimpleNamespace(get_snapshot_by_id=lambda sid: s, get_run=excel_storage.get_run)
+    batch = {'id': 'batch', 'status': 'partial', 'counts': {'new': 1}, 'errors': []}
+    constructor = excel.Workbook
+    allocations = []
+    def workbook():
+        allocations.append(True)
+        return constructor()
+    monkeypatch.setattr(excel, 'Workbook', workbook)
+    for delta in (False, True):
+        book = excel._batch_workbook(storage, batch, [row], delta=delta)
+        try:
+            assert len(book.worksheets) == 7
+            for name, rows in expected.items():
+                actual = [list(r) for r in book[name].iter_rows(min_row=5, values_only=True)]
+                assert [r[:len(rows[0])] for r in actual] == rows
+            ws = book['Giá chi tiết']
+            shared = next(i for i in range(5, ws.max_row + 1) if ws.cell(i, 11).value == 'Có — không nhân giá')
+            assert ws.cell(shared, 11).comment and ws.cell(shared, 1).fill.fgColor.rgb.endswith('FFF3D6')
+            assert all(c.data_type != 'f' for sheet in book for cells in sheet for c in cells)
+        finally:
+            book.close()
+    assert len(allocations) == 2
+
+
 def test_full_excel_no_split(excel_storage, tmp_path):
     s = excel_storage.snapshot
     before = deepcopy(json_value(s))

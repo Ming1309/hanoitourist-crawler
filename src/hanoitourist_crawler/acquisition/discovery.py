@@ -71,6 +71,8 @@ def listing_page(document):
 
 
 class DiscoveryCollector(Collector):
+    """Shared listing scope, request policy and raw storage for HTML discovery."""
+
     def __init__(self, config, storage, run_id, *, pacer=None):
         self.original_config = config
         super().__init__(replace(config, tour_url=config.domestic_listing_url, run_timeout=config.discovery_timeout),
@@ -124,106 +126,6 @@ class DiscoveryCollector(Collector):
             self.pacer.wait(self.deadline)
             self.check()
         self.navigation.fetch(route)
-
-    def collect(self):
-        status, terminal = 'failed', False
-        url = self.config.domestic_listing_url
-        try:
-            self.load_robots()
-            visited, signatures = set(), set()
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=self.config.headless)
-                try:
-                    context = browser.new_context(locale='vi-VN', timezone_id='Asia/Ho_Chi_Minh',
-                        viewport={'width': 1440, 'height': 1000}, user_agent=self.config.user_agent, service_workers='block')
-                    context.route('**/*', self.route)
-                    self.page = context.new_page()
-                    js_errors = []
-                    self.page.on('pageerror', lambda error: js_errors.append('Listing JavaScript error'))
-                    self.page.on('response',self.response)
-                    self.page.on('requestfailed',self.failed_request)
-                    for index in range(self.original_config.max_listing_pages):
-                        self.check()
-                        url = listing_url(url)
-                        if url in visited:
-                            raise CaptureError('Domestic pager repeated a URL')
-                        visited.add(url)
-                        self.state = f'listing:{index}'
-                        self.manifest['actions'][self.state] = 'discovered'
-                        if len(self.manifest['actions']) > self.config.max_states:
-                            raise CaptureError('Listing state limit exceeded')
-                        for attempt in range(self.config.max_retries + 1):
-                            self.check()
-                            response = self.navigate(url)
-                            raw = self.navigation.last_document
-                            if response is None or raw is None:
-                                raise CaptureError('Missing guarded listing navigation response')
-                            if response.status < 400:
-                                break
-                            if response.status not in {429, 500, 502, 503, 504} or attempt == self.config.max_retries:
-                                raise CaptureError(f'Listing navigation HTTP {response.status}; no bypass')
-                            retry = response.headers.get('retry-after', '1')
-                            try:
-                                wait = float(retry) if retry.isdigit() else max(0, (parsedate_to_datetime(retry) - now()).total_seconds())
-                            except (ValueError, TypeError):
-                                wait = 1.0
-                            if time.monotonic() + wait >= self.deadline:
-                                raise CaptureError('Listing Retry-After exceeds budget')
-                            self.page.wait_for_timeout(wait * 1000)
-                        final_url = listing_url(self.page.url)
-                        if final_url != url:
-                            if final_url in visited:
-                                raise CaptureError('Domestic redirect repeated a visited page')
-                            visited.add(final_url)
-                        root = self.page.locator(LISTING_ROOT)
-                        root.wait_for(state='attached')
-                        root.locator(LISTING_ROWS + ', .view-empty').first.wait_for(state='attached')
-                        self.settle(root)
-                        if self.page.locator('text=/captcha|access denied/i').count():
-                            raise CaptureError('Listing access gate; no bypass')
-                        doc = self.save('dom', 'listing_state', self.page.url, self.page.content().encode())
-                        result = listing_page(doc)
-                        source = listing_page(raw)
-                        source_urls = {card['url'] for card in source['cards'] if not card['identity_error']}
-                        rendered_urls = {card['url'] for card in result['cards'] if not card['identity_error']}
-                        if any(card['identity_error'] for card in source['cards']):
-                            result['errors'].append('Unresolved source listing cards')
-                        if source_urls - rendered_urls:
-                            result['errors'].append('Source cards missing from rendered listing')
-                        if js_errors:
-                            result['errors'].extend(js_errors)
-                        self.cards.extend(source['cards'])
-                        self.cards.extend(result['cards'])
-                        self.manifest['pages'].append(result)
-                        self.errors.extend(result['errors'])
-                        self.manifest['actions'][self.state] = 'captured'
-                        self.storage.update_run(self.run_id, manifest=self.manifest)
-                        if result['signature'] in signatures:
-                            raise CaptureError('Domestic pager repeated an inventory state')
-                        signatures.add(result['signature'])
-                        if result['errors']:
-                            raise CaptureError('Domestic page coverage incomplete')
-                        if result['terminal']:
-                            terminal = True
-                            break
-                        url = result['next_url']
-                    if not terminal:
-                        raise CaptureError('Domestic listing page limit exceeded')
-                    status = 'complete'
-                finally:
-                    browser.close()
-        except KeyboardInterrupt:
-            self.errors.append('Interrupted domestic discovery; checkpoints retained')
-            status = 'partial'
-            raise
-        except Exception as exc:
-            self.errors.append(str(exc) if isinstance(exc, CaptureError) else f'Listing failed ({type(exc).__name__})')
-            status = 'partial' if self.cards else 'failed'
-        finally:
-            self.storage.update_run(self.run_id, capture_status=status, final_url=self.page.url if self.page else url, finished_at=now(),
-                                    manifest=self.manifest, errors=self.errors)
-        return DiscoveryResult(status, self.cards, self.manifest['pages'], self.errors, terminal)
-
 
 class HTMLDiscoveryCollector(DiscoveryCollector):
     """Observe scoped server cards without claiming complete catalogue coverage."""

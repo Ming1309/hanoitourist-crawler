@@ -8,6 +8,35 @@ from hanoitourist_crawler.reporting.diagnostics import classify, observe, safe_u
 from hanoitourist_crawler.models import RawDocument, uid
 
 
+def test_report_redacts_source_urls_without_changing_raw_or_losing_actions(tmp_path):
+    from pathlib import Path
+    href = '/tour/8140/lich/8141/booking?token=relative-secret#relative-fragment'
+    state = 'schedule:0:price:' + href
+    raw = RawDocument(uid(), 1, 'http_document', 'tour', state,
+                      'https://hanoitourist.vn/a', href.encode())
+    payload = {'actions': {state: 'captured', state.replace('relative-secret', 'other-secret'): 'discovered',
+                           'schedule:0:price:booking?token=pathless-secret#private': 'captured',
+                           'schedule:0:price:?token=query-only-secret#private': 'captured'},
+               'observations': {'facts': {'state_key': state}},
+               'coverage': {'booking_href_raw': href,
+                            'relative': 'tour/8140/lich/8141/booking?token=bare-secret#bare-fragment',
+                            'url': '//user:protocol-secret@hanoitourist.vn/a?token=query-secret#private'},
+               'url': 'HTTPS://user:absolute-secret@hanoitourist.vn/a?token=absolute-query#absolute-fragment',
+               'description': 'An ordinary description; no URL here.'}
+    path = Path(write_report(tmp_path / 'private', payload, [raw]))
+    report = path.read_text()
+    for secret in ('relative-secret', 'other-secret', 'bare-secret', 'protocol-secret',
+                   'query-secret', 'absolute-secret', 'absolute-query',
+                   'relative-fragment', 'bare-fragment', 'absolute-fragment',
+                   'pathless-secret', 'query-only-secret'):
+        assert secret not in report
+    saved = json.loads(report)
+    assert len(saved['actions']) == 4
+    assert saved['description'] == payload['description']
+    assert saved['coverage']['booking_href_raw'] == '/tour/8140/lich/8141/booking'
+    assert (path.parent / f'raw-{raw.run_id}-{raw.id}.bin').read_bytes() == raw.body
+
+
 def test_timeout_is_unknown_not_network_or_javascript():
     run = {'id': uid(), 'capture_status': 'failed', 'manifest': {}, 'errors': ['TimeoutError']}
     result = classify(run, None, [])

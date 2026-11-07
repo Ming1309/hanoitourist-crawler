@@ -28,6 +28,29 @@ def collector(**overrides):
     return Collector(cfg, store, uid()), store
 
 
+@pytest.mark.parametrize('paged_option', ['A', 'B'])
+def test_combined_dropdown_and_pagination_fails_closed(paged_option, monkeypatch):
+    c, _ = collector()
+    state = ['A']
+    class Select:
+        def count(self): return 1
+        def nth(self, index): return self
+        def locator(self, selector): return self
+        def evaluate_all(self, script): return ['A', 'B']
+        def select_option(self, value): state[0] = value
+    class Next:
+        @property
+        def first(self): return self
+        def count(self): return int(state[0] == paged_option)
+        def is_visible(self): return bool(self.count())
+    scope = SimpleNamespace(locator=lambda selector: Select() if selector == 'select' else Next())
+    monkeypatch.setattr(c, 'settle', lambda *a: None)
+    monkeypatch.setattr(c, 'expand_prices', lambda *a: None)
+    monkeypatch.setattr(c, 'checkpoint', lambda *a: None)
+    with pytest.raises(CaptureError, match='filter.*pagination'):
+        c.select_combinations(scope, 'schedule', 0, ())
+
+
 def mock_robots(monkeypatch, text='User-agent: *\nAllow: /', status=200):
     monkeypatch.setattr(httpx.Client, 'get', lambda self, url: httpx.Response(status, text=text, request=httpx.Request('GET',url)))
 

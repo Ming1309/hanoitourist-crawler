@@ -1,6 +1,9 @@
 """Coverage never promotes an incomplete browser capture to success."""
 
+from bs4 import BeautifulSoup
+
 from ..errors import capture_errors
+from .parser import _schedule_scopes, sources
 
 
 def validate(snapshot, documents, run):
@@ -26,7 +29,10 @@ def validate(snapshot, documents, run):
             issues.append(f'Missing price matrix cells for schedule {sid}')
     if not snapshot.departures:
         # Zero schedules is valid only with an explicit UI empty-result marker.
-        if not any(b'view-empty' in d.body for d in documents if d.role in {'tour', 'schedule'}):
+        if not any(scope.select_one('.view-empty') is not None
+                   for d in documents if d.role in {'tour', 'schedule', 'tour_state'}
+                   for html, _ in sources(d)
+                   for scope in _schedule_scopes(BeautifulSoup(html, 'html.parser'))):
             issues.append('No schedules and no explicit empty-result marker')
     by_id = {}
     for departure in snapshot.departures:

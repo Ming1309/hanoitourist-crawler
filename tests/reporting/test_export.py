@@ -144,7 +144,7 @@ def test_missing_date_export_preserves_row_and_history(storage, documents, tmp_p
     new = parse_run(storage, run)
     path, status = export_run(storage, run, tmp_path)
     payload = json.loads(path.read_text())
-    assert status == 'partial' and new.parser_version == PARSER_VERSION == '0.1.4'
+    assert status == 'partial' and new.parser_version == PARSER_VERSION == '0.1.5'
     assert len(payload['snapshot']['departures']) == 9
     observation = next(d for d in payload['snapshot']['departures'] if d['source_schedule_id'] == '8141')['observations'][0]
     assert observation['departure_at'] is None and len(observation['price_cells']) == 13

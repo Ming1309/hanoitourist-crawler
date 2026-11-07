@@ -19,6 +19,46 @@ def source_failure(storage, capture_history):
     return batch, tour['id'], run
 
 
+@pytest.mark.postgres
+@pytest.mark.parametrize('old_status,new_status,unfinished', [
+    (200, 200, False), (404, 200, False), (410, 200, False),
+    (200, 404, False), (200, 410, False), (404, 200, True)])
+def test_recovery_cannot_undo_newer_scoped_publication(storage, capture_history, documents, tmp_path,
+                                                     old_status, new_status, unfinished):
+    from pathlib import Path
+    from tests.workflows.test_incremental import collector
+    from hanoitourist_crawler.workflows.incremental import recover_batches
+    from hanoitourist_crawler.workflows.pipeline import parse_run
+    source, tid, _ = source_failure(storage, capture_history)
+    abandoned = storage.create_batch()
+    old_run = storage.create_run(DEFAULT_TOUR_URL)
+    storage.begin_attempt(abandoned, tid, old_run, 'retry')
+    collector(documents, http_status=old_status)(Config(), storage, old_run).collect()
+    if old_status == 200:
+        parse_run(storage, old_run)
+    if unfinished:
+        storage.update_run(old_run, capture_status='running', finished_at=None)
+    old = storage.get_run(old_run), storage.get_snapshot(old_run), storage.load_raw(old_run)
+    result = retry_domestic(Config(export_dir=tmp_path), storage, source, [DEFAULT_TOUR_URL],
+                            collector_class=collector(documents, http_status=new_status, price='7,690,000'))
+    current = storage.get_tour(tid)
+    published = storage.get_batch(result.batch_id), storage.batch_tours(result.batch_id)
+    artifacts = {name: Path(path).read_bytes() for name, path in result.paths.items()}
+    recover_batches(storage, tmp_path, batch_id=abandoned)
+    assert storage.get_tour(tid) == current
+    row = storage.batch_tours(abandoned)[0]
+    assert row['outcome'] == 'skipped' and row['change_kinds'] == []
+    assert (storage.get_snapshot(old_run), storage.load_raw(old_run)) == old[1:]
+    if unfinished:
+        recovered = storage.get_run(old_run)
+        assert recovered['capture_status'] == 'partial' and recovered['finished_at'] is not None
+        assert recovered['errors'] == old[0]['errors'] + ['Abandoned capture; checkpoints retained']
+    else:
+        assert storage.get_run(old_run) == old[0]
+    assert (storage.get_batch(result.batch_id), storage.batch_tours(result.batch_id)) == published
+    assert {name: Path(path).read_bytes() for name, path in result.paths.items()} == artifacts
+
+
 def test_requires_frozen_error_source(storage, capture_history):
     batch, tid, run = source_failure(storage, capture_history)
     targets = select_targets(storage, batch, [DEFAULT_TOUR_URL, DEFAULT_TOUR_URL + '/'])

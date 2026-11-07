@@ -14,7 +14,7 @@ from ..models import RawDocument, now
 from .navigation import GuardedNavigation, RESOURCES
 from .scope import redirect_url
 from ..processing.parser import inventory, merge_inventory, sources
-from .selectors import DAY_BUTTONS, DIALOG, DIALOG_LINK, ROOT, SCHEDULE, SECTIONS
+from .selectors import DAY_BUTTONS, DIALOG, DIALOG_LINK, ROOT, SCHEDULE
 
 
 class CaptureError(RuntimeError):
@@ -53,7 +53,6 @@ class Collector:
         self.blocked = set()
         self.fatal = None
         self.robots = None
-        self.last_request = 0.0
         self.page = None
         self.staged_requests = {}
         self.navigation = GuardedNavigation(
@@ -294,6 +293,10 @@ class Collector:
         raise CaptureError('Page limit exceeded')
 
     def select_combinations(self, scope, label, index, trail):
+        next_link = scope.locator('a[rel=next], .pager__item--next a')
+        # shortcut: combined filters and pagination stay partial until each combination can be paged.
+        if next_link.count() and next_link.first.is_visible():
+            raise CaptureError('Combined filters and pagination are unsupported')
         selects = scope.locator('select')
         if index >= selects.count():
             self.expand_prices(scope, label + ':options:' + '|'.join(trail))
