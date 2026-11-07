@@ -230,11 +230,14 @@ def test_two_selected_preserve_source_unrelated_and_old_baseline(
     for kind in ('full', 'delta'):
         book = load_workbook(result.paths[kind])
         try:
-            assert len(book.sheetnames) == 7
-            sheet = book['Danh sách tour']
-            col = [c.value for c in sheet[4]].index('ID catalogue') + 1
-            assert {sheet.cell(i,col).value for i in range(5,sheet.max_row+1)} == (
-                {t['id'] for t in tours} if kind == 'full' else {tours[0]['id']})
+            assert len(book.sheetnames) == 6
+            sheet = book['tour_snapshots']
+            col = [c.value for c in sheet[1]].index('source_tour_id') + 1
+            displayed = [r for r in storage.batch_tours(result.batch_id)
+                         if r['frozen_state'] and r['display_snapshot_id']
+                         and (kind == 'full' or r['change_kinds'])]
+            assert {sheet.cell(i,col).value for i in range(2,sheet.max_row+1)} == {
+                storage.get_snapshot_by_id(r['display_snapshot_id']).source_tour_id for r in displayed}
         finally:
             book.close()
 
@@ -392,9 +395,10 @@ def test_stopped_retry_does_not_overwrite_completed_attempt(
     assert batch['stage'] == 'frozen' and batch['export_status'] == 'complete'
     book = load_workbook(tmp_path/'domestic'/batch_id/'delta.xlsx')
     try:
-        summary = book['Danh sách tour']
-        column = [cell.value for cell in summary[4]].index('ID catalogue') + 1
-        assert [summary.cell(i, column).value for i in range(5, summary.max_row+1)] == [tours[0]]
+        summary = book['tour_snapshots']
+        column = [cell.value for cell in summary[1]].index('source_tour_id') + 1
+        assert [summary.cell(i, column).value for i in range(2, summary.max_row+1)] == [
+            storage.get_tour(tours[0])['source_tour_id']]
     finally:
         book.close()
 

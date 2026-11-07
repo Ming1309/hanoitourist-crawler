@@ -51,8 +51,8 @@ def test_excel_from_database_preserves_history(storage, documents, tmp_path, mon
     path, status = export_excel(storage, run, tmp_path, version='old-parser')
     assert path.name == 'old-parser.xlsx' and status == 'complete'
     book = load_workbook(path)
-    assert book['Lịch trình'].max_row == 8
-    assert book['Giá chi tiết'].max_row == 121
+    assert book['itinerary_days'].max_row == 1 + len(old.days)
+    assert book['price_cells'].max_row == 1 + sum(len(d.price_cells) for d in old.departures)
     assert export_excel(storage, run, tmp_path)[0].name == current.parser_version + '.xlsx'
     monkeypatch.setattr('hanoitourist_crawler.reporting.excel.os.replace',
                         lambda *a: (_ for _ in ()).throw(OSError('disk')))
@@ -172,6 +172,7 @@ def test_reexport_preserves_first_published_receipt(storage, capture_history, tm
     before = storage.get_batch(batch)
     refs = storage.batch_tours(batch)
     original = {p.name:p.read_bytes() for p in paths['full'].parent.iterdir()}
+    assert json.loads((paths['full'].parent / '.bundle.json').read_text())['schema'] == 'v4'
     alternate = export_batch_excel(storage, batch, tmp_path/'alternate')
     assert alternate['full'].exists() and alternate != paths
     assert storage.get_batch(batch) == before and storage.batch_tours(batch) == refs
@@ -368,7 +369,7 @@ def test_invalid_published_bundle_is_rejected_without_overwrite(storage, capture
 @pytest.mark.parametrize('last_status', ['complete', 'partial', 'failed'])
 def test_scoped_publication_reuses_cached_refs_and_preserves_old_bundle(storage, capture_history, tmp_path, last_status):
     from openpyxl import load_workbook
-    from hanoitourist_crawler.reporting.excel import export_batch_excel, _local
+    from hanoitourist_crawler.reporting.excel import export_batch_excel
     urls = ['https://hanoitourist.vn/repair-tour-' + str(i) for i in range(4)]
     old_batch = storage.create_batch()
     tours = [storage.register_tour(url, 'Tour '+str(i), old_batch) for i, url in enumerate(urls)]
@@ -391,31 +392,63 @@ def test_scoped_publication_reuses_cached_refs_and_preserves_old_bundle(storage,
     paths = export_batch_excel(storage, batch, tmp_path)
     assert storage.get_batch(batch)['discovery_run_id'] is None
     assert not storage.get_batch(batch)['discovery_complete']
+    displayed = []
+    for tour in tours:
+        row = next(r for r in storage.batch_tours(batch) if r['tour_id'] == tour['id'])
+        snap = storage.get_snapshot_by_id(row['display_snapshot_id']) if row['display_snapshot_id'] else None
+        displayed.append((tour, row, snap))
     book = load_workbook(paths['full'])
     try:
-        assert len(book.sheetnames) == 7
-        headers = [c.value for c in book['Danh sách tour'][4]]
-        summary = {dict(zip(headers, r))['ID catalogue']:dict(zip(headers, r))
-                   for r in book['Danh sách tour'].iter_rows(min_row=5, values_only=True)}
-        assert len(summary) == 4
-        for i, tour in enumerate(tours):
+        assert book.sheetnames == ['tour_snapshots', 'tour_sections', 'itinerary_days',
+                                   'departure_observations', 'price_cells', 'tour_media']
+        ws = book['tour_snapshots']
+        cols = [c.value for c in ws[1]]
+        assert cols[:2] == ['id', 'source_tour_id']
+        assert not {'status', 'warnings', 'coverage', 'provenance', 'parser_version',
+                    'run_id'} & set(cols)
+        assert [book['tour_sections'].cell(1, ci).value for ci in (1, 2)] == ['source_tour_id', 'snapshot_id']
+        assert [book['itinerary_days'].cell(1, ci).value for ci in (1, 2)] == ['source_tour_id', 'snapshot_id']
+        assert [book['departure_observations'].cell(1, ci).value
+                for ci in (1, 2, 3, 4)] == ['source_tour_id', 'id', 'snapshot_id', 'source_schedule_id']
+        assert [book['price_cells'].cell(1, ci).value
+                for ci in (1, 2, 3)] == ['source_tour_id', 'source_schedule_id', 'departure_id']
+        assert [book['tour_media'].cell(1, ci).value for ci in (1, 2)] == ['source_tour_id', 'snapshot_id']
+
+        def keys(name, header):
+            sheet = book[name]
+            column = [c.value for c in sheet[1]].index(header)
+            return [r[column] for r in sheet.iter_rows(min_row=2, values_only=True)]
+
+        parents = keys('tour_snapshots', 'id')
+        parent_ids = set(parents)
+        tour_by_parent = dict(zip(parents, keys('tour_snapshots', 'source_tour_id')))
+        assert len(parents) == len(parent_ids)
+        for name in ('tour_sections', 'itinerary_days', 'departure_observations', 'tour_media'):
+            snapshot_ids = keys(name, 'snapshot_id')
+            assert set(snapshot_ids) <= parent_ids
+            assert all(tour_by_parent[parent] == tour for tour, parent
+                       in zip(keys(name, 'source_tour_id'), snapshot_ids))
+        departures = keys('departure_observations', 'id')
+        departure_tour = dict(zip(departures, (tour_by_parent[p] for p in
+                                               keys('departure_observations', 'snapshot_id'))))
+        departure_schedule = dict(zip(departures, keys('departure_observations', 'source_schedule_id')))
+        assert len(departures) == len(set(departures))
+        for tour, schedule, departure in zip(keys('price_cells', 'source_tour_id'),
+                                             keys('price_cells', 'source_schedule_id'),
+                                             keys('price_cells', 'departure_id')):
+            assert departure in departure_tour
+            assert tour == departure_tour[departure] and schedule == departure_schedule[departure]
+        summary = {r[cols.index('source_tour_id')]: dict(zip(cols, r))
+                   for r in ws.iter_rows(min_row=2, values_only=True)}
+        assert set(summary) == {snap.source_tour_id for _, _, snap in displayed if snap}
+        for name, count in [('tour_sections', lambda s: len(s.sections)),
+                            ('itinerary_days', lambda s: len(s.days)),
+                            ('departure_observations', lambda s: len(s.departures)),
+                            ('price_cells', lambda s: sum(len(d.price_cells) for d in s.departures)),
+                            ('tour_media', lambda s: len(s.media))]:
+            assert book[name].max_row == 1 + sum(count(snap) for _, _, snap in displayed if snap)
+        for i, (tour, row, snap) in enumerate(displayed):
             state = storage.get_tour(tour['id'])
-            row = next(r for r in storage.batch_tours(batch) if r['tour_id'] == tour['id'])
-            snap = storage.get_snapshot_by_id(row['display_snapshot_id'])
-            assert summary[tour['id']]['ID snapshot'] == snap.id
-            assert summary[tour['id']]['Chất lượng dữ liệu'] == snap.status
-            checked = summary[tour['id']]['Kiểm tra thành công (VN)']
-            if state['last_successful_check_at']:
-                assert abs((checked - _local(state['last_successful_check_at'])).total_seconds()) <= 0.001
-            else:
-                assert checked is None
-            for name, expected in [('Lịch trình', len(snap.days)),
-                                   ('Lịch khởi hành', len(snap.departures)),
-                                   ('Giá chi tiết', sum(len(d.price_cells) for d in snap.departures))]:
-                ws = book[name]; cols = [c.value for c in ws[4]]
-                child = [dict(zip(cols, r)) for r in ws.iter_rows(min_row=5, values_only=True)
-                         if r[cols.index('ID catalogue')] == tour['id']]
-                assert len(child) == expected and all(r['ID snapshot'] == snap.id for r in child)
             if i < 2:
                 assert state == cached[i] and row['attempt_run_ids'] == [] and row['change_kinds'] == []
             if i == 3 and last_status != 'complete':

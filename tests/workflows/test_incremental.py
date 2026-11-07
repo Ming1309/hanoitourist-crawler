@@ -92,11 +92,11 @@ def config(tmp_path):
     return Config(database_url='unused',export_dir=tmp_path,request_interval=0)
 
 
-def summaries(path, header):
+def summaries(path, header='source_tour_id'):
     book=load_workbook(path)
     try:
-        ws=book['Danh sách tour']; col=[c.value for c in ws[4]].index(header)+1
-        return [ws.cell(i,col).value for i in range(5,ws.max_row+1)]
+        ws=book['tour_snapshots']; col=[c.value for c in ws[1]].index(header)+1
+        return [ws.cell(i,col).value for i in range(2,ws.max_row+1)]
     finally: book.close()
 
 
@@ -125,20 +125,19 @@ def test_html_partial_batch_accepts_details_then_reuses_fresh(storage, documents
     snapshot = storage.get_snapshot_by_id(new['current_snapshot_id'])
     assert snapshot.status == 'complete' and len(snapshot.days) == 4
     assert len(snapshot.departures) == 9 and sum(len(d.price_cells) for d in snapshot.departures) == 117
-    assert summaries(first.paths['delta'], 'ID catalogue') == [new['id']]
+    assert summaries(first.paths['delta']) == [new['source_tour_id']]
     old_bytes = {name: path.read_bytes() for name, path in first.paths.items()}
     checked = new['last_successful_check_at']
     second = crawl_domestic(cfg, storage, collector_class=collector(documents, calls=calls))
     assert second.status == 'partial' and calls == [NEW_URL]
     assert storage.get_tour(new['id'])['last_successful_check_at'] == checked
-    assert summaries(second.paths['delta'], 'Tên tour') == []
+    assert summaries(second.paths['delta'], 'source_tour_id') == []
     assert fetched == [cfg.domestic_listing_url, cfg.domestic_listing_url+'?page=1'] * 2
     for name, path in export_batch_excel(storage, first.batch_id, tmp_path).items():
         assert path.read_bytes() == old_bytes[name]
     book = load_workbook(first.paths['full'])
     try:
-        assert len(book.sheetnames) == 7
-        assert any('coverage' in str(value).lower() for row in book['Nhật ký tải'].iter_rows(values_only=True) for value in row)
+        assert len(book.sheetnames) == 6 and 'Nhật ký tải' not in book.sheetnames
     finally:
         book.close()
 
@@ -174,7 +173,7 @@ def test_html_ttl_cycle_skips_before_boundary_and_recaptures_at_boundary(
     fresh = storage.get_tour(original['id'])
     assert calls == [DEFAULT_TOUR_URL] and second.counts['skipped'] == 1
     assert (fresh['current_snapshot_id'], fresh['fingerprint'], fresh['last_successful_check_at']) == baseline
-    assert summaries(second.paths['delta'], 'Tên tour') == []
+    assert summaries(second.paths['delta'], 'source_tour_id') == []
 
     at_boundary = checked + timedelta(days=cfg.recheck_days)
     third = crawl_domestic(cfg, storage, clock=lambda: at_boundary,
@@ -184,7 +183,7 @@ def test_html_ttl_cycle_skips_before_boundary_and_recaptures_at_boundary(
     row = next(r for r in storage.batch_tours(third.batch_id) if r['frozen_state'])
     assert calls == [DEFAULT_TOUR_URL, DEFAULT_TOUR_URL]
     assert row['selection_reason'] == 'due' and row['outcome'] == outcome
-    assert bool(summaries(third.paths['delta'], 'Tên tour')) is (outcome == 'changed')
+    assert bool(summaries(third.paths['delta'], 'source_tour_id')) is (outcome == 'changed')
     if capture_status == 'complete':
         assert current['current_snapshot_id'] != baseline[0]
         # Watermark is the actual successful capture finish, not the injected selection clock.
@@ -196,7 +195,7 @@ def test_html_ttl_cycle_skips_before_boundary_and_recaptures_at_boundary(
                                collector_class=collector(documents, calls=calls))
         assert fourth.counts['skipped'] == 1 and calls == [DEFAULT_TOUR_URL, DEFAULT_TOUR_URL]
         assert storage.get_tour(original['id'])['last_successful_check_at'] == current['last_successful_check_at']
-        assert summaries(fourth.paths['delta'], 'Tên tour') == []
+        assert summaries(fourth.paths['delta'], 'source_tour_id') == []
     else:
         assert (current['current_snapshot_id'], current['fingerprint'], current['last_successful_check_at']) == baseline
         assert current['requires_refresh'] and current['availability'] == 'available'
@@ -230,7 +229,7 @@ def test_html_partial_still_uses_qualified_detail_outcomes(storage, capture_hist
         assert tour['current_snapshot_id'] == old.id and tour['last_successful_check_at'] == at
     else:
         assert tour['current_snapshot_id'] != old.id and tour['last_successful_check_at'] > at
-    assert bool(summaries(result.paths['delta'], 'Tên tour')) is bool(change)
+    assert bool(summaries(result.paths['delta'], 'source_tour_id')) is bool(change)
     row = next(r for r in storage.batch_tours(result.batch_id) if r['frozen_state'])
     assert row['change_kinds'] == ([change] if change else [])
 
@@ -436,8 +435,8 @@ def test_reuse_skips_details_and_empty_delta(storage,capture_history,documents,t
     calls=[]
     result=crawl_domestic(config(tmp_path),storage,discovery=discovery([DEFAULT_TOUR_URL]),collector_class=collector(documents,calls=calls))
     assert result.status=='complete' and calls==[]
-    assert summaries(result.paths['delta'],'Tên tour')==[]
-    assert len(summaries(result.paths['full'],'Tên tour'))==1
+    assert summaries(result.paths['delta'],'source_tour_id')==[]
+    assert len(summaries(result.paths['full'],'source_tour_id'))==1
 
 
 @pytest.mark.postgres
@@ -449,8 +448,8 @@ def test_missing_listing_is_verified_not_assumed(storage,capture_history,documen
     state=storage.list_tours()[0]
     assert calls==[DEFAULT_TOUR_URL] and state['availability']==availability
     if status!=200: assert state['last_successful_check_at']==old
-    assert summaries(result.paths['full'],'Khả dụng')==[availability]
-    assert bool(summaries(result.paths['delta'],'Tên tour')) is (availability=='unavailable')
+    assert len(summaries(result.paths['full'])) == 1
+    assert bool(summaries(result.paths['delta'],'source_tour_id')) is (availability=='unavailable')
 
 
 @pytest.mark.postgres
@@ -466,13 +465,13 @@ def test_new_then_cached_and_historical_export(storage,documents,tmp_path):
     calls=[];cfg=config(tmp_path)
     first=crawl_domestic(cfg,storage,discovery=discovery([NEW_URL]),collector_class=collector(documents,calls=calls))
     assert first.status=='complete' and first.counts['new']==1 and calls==[NEW_URL]
-    assert len(summaries(first.paths['delta'],'Tên tour'))==1
+    assert len(summaries(first.paths['delta'],'source_tour_id'))==1
     previous=first.paths['full'].read_bytes()
     second=crawl_domestic(cfg,storage,discovery=discovery([NEW_URL]),collector_class=collector(documents,calls=calls))
     assert second.status=='complete' and calls==[NEW_URL]
-    assert summaries(second.paths['delta'],'Tên tour')==[]
+    assert summaries(second.paths['delta'],'source_tour_id')==[]
     assert export_batch_excel(storage,first.batch_id,tmp_path)['full'].read_bytes()==previous
-    assert len(load_workbook(first.paths['full']).sheetnames)==7
+    assert len(load_workbook(first.paths['full']).sheetnames)==6
 
 
 @pytest.mark.postgres
@@ -482,7 +481,7 @@ def test_partial_does_not_promote_or_advance(storage,capture_history,documents,t
     state=storage.list_tours()[0]
     assert result.status=='partial' and state['current_snapshot_id']==old.id
     assert state['last_successful_check_at']==at and state['requires_refresh']
-    assert summaries(result.paths['delta'],'Tên tour')==[]
+    assert summaries(result.paths['delta'],'source_tour_id')==[]
 
 
 @pytest.mark.postgres
@@ -515,7 +514,7 @@ def test_crash_after_snapshot_recovers_without_network(storage,documents,tmp_pat
     recovered=storage.get_batch(batch)
     assert recovered['status']=='partial' and recovered['export_status']=='complete'
     assert recovered['counts']['new']==1
-    assert summaries(tmp_path/'domestic'/batch/'delta.xlsx','Khả dụng')==['available']
+    assert len(summaries(tmp_path/'domestic'/batch/'delta.xlsx'))==1
 
 
 @pytest.mark.postgres
@@ -546,7 +545,7 @@ def test_unowned_diagnostic_does_not_mark_unavailable(storage, capture_history, 
     assert storage.load_raw(run)[0].http_status == status and capture.errors
     storage.freeze_batch(batch, 'partial')
     paths = export_batch_excel(storage, batch, tmp_path)
-    assert summaries(paths['delta'], 'Tên tour') == []
+    assert summaries(paths['delta'], 'source_tour_id') == []
 
 
 @pytest.mark.postgres
@@ -559,16 +558,14 @@ def test_identity_rejected_complete_is_not_displayed(storage, capture_history, d
     assert tour['source_tour_id'] == '8140' and tour['current_snapshot_id'] is None
     assert tour['availability'] == 'pending' and tour['last_successful_check_at'] is None
     assert tour['fingerprint'] is None and result.counts['failed'] == 1
-    assert summaries(result.paths['full'], 'Chất lượng dữ liệu') == ['partial']
-    assert summaries(result.paths['full'], 'ID tour') == ['8140']
-    assert summaries(result.paths['delta'], 'Tên tour') == []
+    assert summaries(result.paths['full'], 'source_tour_id') == ['8140']
+    assert summaries(result.paths['delta'], 'source_tour_id') == []
     book = load_workbook(result.paths['full'])
     try:
-        for ws in list(book)[:6]:
-            headers = [c.value for c in ws[4]]
-            for values in ws.iter_rows(min_row=5, values_only=True):
-                assert values[headers.index('ID tour')] == '8140'
-                assert values[headers.index('ID snapshot')] == partial.id
+        assert len(book.sheetnames) == 6
+        assert book['itinerary_days'].max_row == 1 + len(partial.days)
+        assert book['departure_observations'].max_row == 1 + len(partial.departures)
+        assert book['price_cells'].max_row == 1 + sum(len(d.price_cells) for d in partial.departures)
     finally:
         book.close()
     row = next(r for r in storage.batch_tours(result.batch_id) if r['frozen_state'])
@@ -600,7 +597,7 @@ def test_alias_target_is_not_captured_twice(storage, capture_history, documents,
     current = storage.get_tour(old['id'])
     assert active['result_snapshot_id'] == current['current_snapshot_id']
     assert current['last_successful_check_at'] == storage.get_run(active['attempt_run_ids'][0])['finished_at']
-    assert summaries(result.paths['delta'], 'ID catalogue') == [old['id']]
+    assert summaries(result.paths['delta']) == [old['source_tour_id']]
     assert storage.batch_tours(seed) == previous
 
 
@@ -616,7 +613,7 @@ def test_unsuccessful_alias_stays_separate(storage, capture_history, documents, 
                                                       capture_status='partial'))
     assert calls == [alias, known] and len(storage.list_tours()) == 2 and result.status == 'partial'
     assert all(t['superseded_by_id'] is None for t in storage.list_tours())
-    assert summaries(result.paths['delta'], 'Tên tour') == []
+    assert summaries(result.paths['delta'], 'source_tour_id') == []
 
 
 @pytest.mark.postgres
@@ -641,7 +638,7 @@ def test_canonical_before_unknown_alias_still_verifies_identity(storage, capture
     assert calls == [known, alias] and result.status == 'complete' and len(storage.list_tours()) == 1
     active = next(r for r in storage.batch_tours(result.batch_id) if r['frozen_state'])
     assert active['outcome'] == 'changed' and active['change_kinds'] == ['updated']
-    assert len(active['attempt_run_ids']) == 2 and len(summaries(result.paths['delta'], 'Tên tour')) == 1
+    assert len(active['attempt_run_ids']) == 2 and len(summaries(result.paths['delta'], 'source_tour_id')) == 1
     assert active['result_snapshot_id'] == storage.list_tours()[0]['current_snapshot_id']
 
 
@@ -694,14 +691,12 @@ def test_recovery_rejects_wrong_identity_without_mutating_history(storage, captu
     assert rows[0]['display_snapshot_id'] == (partial.id if partial else None)
     assert rows[0]['outcome'] == 'failed' and rows[0]['errors'] and not rows[0]['change_kinds']
     paths = export_batch_excel(storage, batch, tmp_path)
-    assert summaries(paths['full'], 'Chất lượng dữ liệu') == ['partial' if partial else 'pending']
-    assert summaries(paths['full'], 'ID tour') == ['8140']
-    assert summaries(paths['delta'], 'Tên tour') == []
+    assert summaries(paths['full'], 'source_tour_id') == (['8140'] if partial else [])
+    assert summaries(paths['delta'], 'source_tour_id') == []
     if not partial:
-        assert summaries(paths['full'], 'Số lịch') == [None]
         book = load_workbook(paths['full'])
         try:
-            assert all(ws.max_row == 4 for ws in list(book)[1:6])
+            assert all(ws.max_row == 1 for ws in book)
         finally: book.close()
     recover_batches(storage, tmp_path)
     assert storage.batch_tours(batch) == rows

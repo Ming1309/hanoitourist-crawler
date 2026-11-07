@@ -146,7 +146,7 @@ def test_partial_attempt_does_not_overwrite_accepted_snapshot(storage, capture_h
     assert tour['current_snapshot_id'] == baseline.id
     assert tour['last_successful_check_at'] == at and tour['requires_refresh']
     assert row['outcome'] == 'partial'
-    assert summaries(result.paths['delta'], 'Tên tour') == []
+    assert summaries(result.paths['delta'], 'source_tour_id') == []
 
 
 @pytest.mark.postgres
@@ -177,16 +177,12 @@ def test_explicit_batch_retains_other_catalogue_tours(storage, capture_history, 
     assert other_row['discovered'] is False and other_row['outcome'] == 'skipped'
     assert other_row['attempt_run_ids'] == []
     new = next(t for t in storage.list_tours() if t['canonical_url'] == NEW_URL)
-    assert summaries(result.paths['delta'], 'ID catalogue') == [new['id']]
-    assert set(summaries(result.paths['full'], 'ID catalogue')) == {other['id'], new['id']}
-    assert set(summaries(result.paths['full'], 'Khả dụng')) == {'available'}
+    assert summaries(result.paths['delta'], 'source_tour_id') == [new['source_tour_id']]
+    assert set(summaries(result.paths['full'], 'source_tour_id')) == {
+        other['source_tour_id'], new['source_tour_id']}
     book = load_workbook(result.paths['full'])
     try:
-        assert 'explicit-target' in book['Nhật ký tải'].cell(2, 1).value
-        headers = [c.value for c in book['Nhật ký tải'][4]]
-        journal = list(book['Nhật ký tải'].iter_rows(min_row=5, values_only=True))
-        assert any('catalogue coverage not assessed' in str(row[headers.index('Lỗi')]) for row in journal)
-        assert any(row[headers.index('Lý do chọn')] == 'requested' for row in journal)
+        assert len(book.sheetnames) == 6 and 'Nhật ký tải' not in book.sheetnames
     finally:
         book.close()
 

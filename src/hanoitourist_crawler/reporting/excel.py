@@ -1,32 +1,124 @@
-"""Readable six-sheet Excel view of one persisted snapshot; JSON remains canonical."""
+"""Excel view of persisted source data; JSON remains canonical.
+
+Only source-data columns, the keys needed to rebuild parent-child
+relationships, and the parent's source identifiers projected onto each child
+are exported, under their exact PostgreSQL names. Other
+ingestion metadata (run/batch ids, parser versions, statuses, warnings,
+provenance, timestamps added during capture) is intentionally absent.
+"""
 
 import math
 import os
 import tempfile
 import json
 import shutil
-from datetime import datetime
 from hashlib import sha256
-from collections import Counter, defaultdict
 from decimal import Decimal
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from bs4 import BeautifulSoup
 from openpyxl import Workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
-from openpyxl.comments import Comment
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.table import Table, TableStyleInfo
 
-LABELS = {'diemnoibat': 'Điểm nổi bật', 'baogom': 'Dịch vụ bao gồm',
-          'khongbaogom': 'Dịch vụ không bao gồm', 'dieukien': 'Điều kiện',
-          'ghichu': 'Ghi chú', 'videos': 'Video', 'lichtrinh': 'Lịch trình',
-          'lichkhoihanh': 'Lịch khởi hành'}
-KEY_HEADERS = ['ID tour', 'ID snapshot', 'Run ID']
-GREEN = '176B55'
+# Explicit allowlists: columns not listed here never reach the workbook.
+# Leading keys mirror the PostgreSQL foreign keys so every child row can be
+# joined to its parent inside the workbook alone. `source_tour_id` and
+# price-cell `source_schedule_id` are projection-only conveniences derived
+# from those parents; they are not persisted on the child tables.
+COLUMNS = {
+    'tour_snapshots': [
+        'id', 'source_tour_id',
+        'canonical_url', 'title', 'duration_text', 'duration_days',
+        'duration_nights', 'origin_text', 'promotional_price_raw', 'promotional_price',
+        'promotional_currency', 'seats_raw', 'seats', 'review_summary', 'sidebar_text'],
+    # content_html is omitted: source sections regularly exceed Excel's 32767-char
+    # cell limit, while content_text carries the readable value. JSON keeps both.
+    'tour_sections': [
+        'source_tour_id', 'snapshot_id',
+        'key', 'ordinal', 'title', 'content_text', 'state'],
+    'itinerary_days': [
+        'source_tour_id', 'snapshot_id',
+        'ordinal', 'label', 'title', 'content_text', 'transport_labels'],
+    'departure_observations': [
+        'source_tour_id', 'id', 'snapshot_id', 'source_schedule_id',
+        'booking_href', 'departure_raw', 'departure_at', 'seats_raw',
+        'seats', 'price_from_raw', 'price_from', 'currency', 'features'],
+    'price_cells': [
+        'source_tour_id', 'source_schedule_id', 'departure_id',
+        'row_index', 'column_index', 'price_label', 'age_label', 'raw_value', 'amount',
+        'currency', 'rowspan', 'colspan', 'applicable_labels'],
+    'tour_media': [
+        'source_tour_id', 'snapshot_id',
+        'role', 'url', 'original_url', 'alt', 'caption', 'ordinal', 'section_key', 'day_ordinal'],
+}
+
+WIDTHS = {
+    'tour_snapshots': {
+        'id': 38, 'source_tour_id': 16, 'canonical_url': 50, 'title': 45, 'duration_text': 18,
+        'duration_days': 12, 'duration_nights': 12, 'origin_text': 22,
+        'promotional_price_raw': 20, 'promotional_price': 18, 'promotional_currency': 10,
+        'seats_raw': 14, 'seats': 10, 'review_summary': 50, 'sidebar_text': 70},
+    'tour_sections': {
+        'source_tour_id': 16, 'snapshot_id': 38, 'key': 18, 'ordinal': 10, 'title': 32,
+        'content_text': 90, 'state': 12},
+    'itinerary_days': {
+        'source_tour_id': 16, 'snapshot_id': 38, 'ordinal': 10, 'label': 24, 'title': 45,
+        'content_text': 90, 'transport_labels': 34},
+    'departure_observations': {
+        'source_tour_id': 16, 'id': 38, 'snapshot_id': 38, 'source_schedule_id': 20,
+        'booking_href': 55, 'departure_raw': 24, 'departure_at': 22, 'seats_raw': 14,
+        'seats': 10, 'price_from_raw': 20, 'price_from': 18, 'currency': 10, 'features': 45},
+    'price_cells': {
+        'source_tour_id': 16, 'source_schedule_id': 20, 'departure_id': 38,
+        'row_index': 11, 'column_index': 11, 'price_label': 28, 'age_label': 24,
+        'raw_value': 20, 'amount': 18, 'currency': 10, 'rowspan': 10, 'colspan': 10,
+        'applicable_labels': 50},
+    'tour_media': {
+        'source_tour_id': 16, 'snapshot_id': 38, 'role': 14, 'url': 60, 'original_url': 55,
+        'alt': 40, 'caption': 40, 'ordinal': 10, 'section_key': 18, 'day_ordinal': 12},
+}
+
+WRAP = {
+    'tour_snapshots': {'canonical_url', 'title', 'review_summary', 'sidebar_text'},
+    'tour_sections': {'title', 'content_text'},
+    'itinerary_days': {'label', 'title', 'content_text', 'transport_labels'},
+    'departure_observations': {'booking_href', 'features'},
+    'price_cells': {'price_label', 'age_label', 'applicable_labels'},
+    'tour_media': {'url', 'original_url', 'alt', 'caption'},
+}
+MONEY = {
+    'tour_snapshots': {'promotional_price'},
+    'tour_sections': set(), 'itinerary_days': set(),
+    'departure_observations': {'price_from'},
+    'price_cells': {'amount'}, 'tour_media': set(),
+}
+DATES = {'tour_snapshots': set(), 'tour_sections': set(), 'itinerary_days': set(),
+         'departure_observations': {'departure_at'}, 'price_cells': set(), 'tour_media': set()}
+URLS = {'tour_snapshots': {'canonical_url'}, 'tour_sections': set(), 'itinerary_days': set(),
+        'departure_observations': set(), 'price_cells': set(),
+        'tour_media': {'url', 'original_url'}}
+INTS = {
+    'tour_snapshots': {'duration_days', 'duration_nights', 'seats'},
+    'tour_sections': {'ordinal'},
+    'itinerary_days': {'ordinal'},
+    'departure_observations': {'seats'},
+    'price_cells': {'row_index', 'column_index', 'rowspan', 'colspan'},
+    'tour_media': {'ordinal', 'day_ordinal'},
+}
+
+HEADER_FILL = PatternFill('solid', fgColor='FF243447')
+HEADER_FONT = Font(name='Calibri', size=11, bold=True, color='FFFFFFFF')
+BODY_FONT = Font(name='Calibri', size=11, color='FF1F2937')
+BODY_FILL = PatternFill('solid', fgColor='FFFFFFFF')
+BORDER = Border(left=Side(style='thin', color='FFCBD5E1'), right=Side(style='thin', color='FFCBD5E1'),
+                top=Side(style='thin', color='FFCBD5E1'), bottom=Side(style='thin', color='FFCBD5E1'))
+
+# v1-v3 bundles predate the tour-level projection columns; they stay immutable.
+BUNDLE_SCHEMAS = {'v1', 'v2', 'v3', 'v4'}
+NEW_BUNDLE_SCHEMA = 'v4'
 
 
 def _local(value):
@@ -51,146 +143,95 @@ def _text(value):
     return value
 
 
-def _sheet(book, name, note, headers, rows, widths, hidden=(), wrap=(), money=(), dates=(), urls=()):
-    if len(rows) + 4 > 1048576:
+def _sheet(book, name, rows):
+    columns = COLUMNS[name]
+    if len(rows) + 1 > 1048576:
         raise ValueError('Excel row limit exceeded; use JSON export')
     ws = book.create_sheet(name)
-    last = len(headers)
-    for ri, value in ((1, name.upper()), (2, note)):
-        ws.merge_cells(start_row=ri, start_column=1, end_row=ri, end_column=last)
-        ws.cell(ri, 1, _text(value)).font = Font(name='Calibri', size=18 if ri == 1 else 10,
-                                              bold=ri == 1, color=GREEN)
-        ws.cell(ri, 1).alignment = Alignment(wrap_text=True, vertical='center')
-        ws.row_dimensions[ri].height = 30 if ri == 1 else 34
-    for ci, label in enumerate(headers, 1):
-        cell = ws.cell(4, ci, label)
-        cell.font = Font(name='Calibri', bold=True, color='FFFFFF')
-        cell.fill = PatternFill('solid', fgColor=GREEN)
-        cell.alignment = Alignment(wrap_text=True, vertical='center')
-    ws.row_dimensions[4].height = 34
-    for ri, row in enumerate(rows, 5):
+    for ci, header in enumerate(columns, 1):
+        cell = ws.cell(1, ci, header)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cell.border = BORDER
+    ws.row_dimensions[1].height = 32
+    widths = WIDTHS[name]
+    for ri, row in enumerate(rows, 2):
         lines = 1
-        for ci, value in enumerate(row, 1):
+        for ci, column in enumerate(columns, 1):
+            value = row[ci - 1]
             cell = ws.cell(ri, ci, _text(value))
             if isinstance(value, str):
                 cell.data_type = 's'  # Never interpret source text as a formula.
-            cell.font = Font(name='Calibri', size=11, color='20352E')
-            cell.alignment = Alignment(vertical='top', wrap_text=ci in wrap)
-            if ci in money:
+            cell.font = BODY_FONT
+            cell.fill = BODY_FILL
+            cell.border = BORDER
+            cell.alignment = Alignment(
+                vertical='center', wrap_text=column in WRAP[name],
+                horizontal='right' if column in MONEY[name] | DATES[name] | INTS[name] else 'left')
+            if column in MONEY[name]:
                 fractional = isinstance(value, Decimal) and value != value.to_integral_value()
                 cell.number_format = '#,##0.00' if fractional else '#,##0'
-            if ci in dates:
+            elif column in INTS[name]:
+                cell.number_format = '#,##0'
+            elif column in DATES[name]:
                 cell.number_format = 'dd/mm/yyyy hh:mm'
-            if ci in urls and isinstance(value, str):
+            if column in URLS[name] and isinstance(value, str):
                 target = urlsplit(value)
                 if target.scheme in {'https', 'http'} and '/booking' not in target.path:
                     cell.hyperlink = value
-                    cell.font = Font(name='Calibri', size=11, color='167B8C', underline='single')
-            if ci in wrap and value:
-                width = max(12, widths[ci - 1] - 2)
+                    cell.font = Font(name='Calibri', size=11, color='FF167B8C', underline='single')
+            if column in WRAP[name] and value:
+                width = max(12, widths[column] - 2)
                 lines = max(lines, sum(max(1, math.ceil(len(line) / width))
                                        for line in str(value).split('\n')))
-        ws.row_dimensions[ri].height = min(409, max(30, 16 * lines + 10))
-    for ci, width in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(ci)].width = width
-    for ci in hidden:
-        ws.column_dimensions[get_column_letter(ci)].hidden = True
-    ref = f'A4:{get_column_letter(last)}{4 + len(rows)}'
-    if rows:
-        table = Table(displayName=f'Data{len(book.worksheets)}', ref=ref)
-        table.tableStyleInfo = TableStyleInfo(name='TableStyleMedium4', showRowStripes=True)
-        ws.add_table(table)
-    else:
-        ws.auto_filter.ref = ref
-    ws.freeze_panes = 'B5'
-    ws.sheet_view.showGridLines = False
-    ws.sheet_view.zoomScale = 85
-    ws.sheet_properties.tabColor = GREEN
+        ws.row_dimensions[ri].height = min(409, max(20, 16 * lines + 10))
+    for ci, column in enumerate(columns, 1):
+        ws.column_dimensions[get_column_letter(ci)].width = widths[column]
+    ws.auto_filter.ref = f'A1:{get_column_letter(len(columns))}{len(rows) + 1}'
+    ws.freeze_panes = 'A2'
     return ws
 
 
-def _snapshot_rows(snapshot, run):
-    s = snapshot
-    sheets = {}
-    def sheet(name, note, headers, rows, widths, hidden=(), wrap=(), money=(), dates=(), urls=()):
-        sheets[name] = dict(note=note, headers=headers, rows=rows, widths=widths,
-                            hidden=hidden, wrap=wrap, money=money, dates=dates, urls=urls)
-    keys = [s.source_tour_id, s.id, s.run_id]
-    summary = [[s.title, s.origin_text, s.duration_text, _amount(s.promotional_price),
-                s.promotional_price_raw, len({d.source_schedule_id for d in s.departures}),
-                s.status, '\n'.join(s.warnings), _local(run['started_at']), s.canonical_url,
-                s.review_summary, s.sidebar_text, s.parser_version, *keys]]
-    sheet('Danh sách tour', 'Một dòng / snapshot. Giá quảng bá không thay giá từng lịch; giờ Việt Nam.',
-           ['Tên tour', 'Khởi hành từ', 'Thời lượng', 'Giá quảng bá', 'Giá — nguyên văn',
-            'Số lịch', 'Trạng thái', 'Cảnh báo', 'Crawl lúc (VN)', 'URL nguồn',
-            'Đánh giá nguồn', 'Thông tin sidebar', 'Parser version', *KEY_HEADERS],
-           summary, [46, 20, 18, 19, 24, 12, 15, 55, 23, 42, 48, 65, 15, 18, 38, 38],
-           hidden=(14, 15, 16), wrap=(1, 8, 10, 11, 12), money=(4,), dates=(9,), urls=(10,))
-    variants = Counter()
-    contents = []
-    for section in sorted(s.sections, key=lambda x: (x.ordinal, x.id)):
-        if section.key in {'lichtrinh', 'lichkhoihanh'}:
-            continue  # These have dedicated structured sheets.
-        variants[section.key] += 1
-        contents.append([s.title, LABELS.get(section.key, section.key), section.title, section.state,
-                         variants[section.key], section.content_text, section.id, *keys])
-    sheet('Nội dung tour', 'Mỗi mục / biến thể một dòng. Nội dung đầy đủ trong một ô; không chia đoạn.',
-           ['Tên tour', 'Mục nội dung', 'Tiêu đề nguồn', 'Trạng thái mục', 'Biến thể',
-            'Nội dung đầy đủ', 'ID section', *KEY_HEADERS], contents,
-           [38, 27, 32, 18, 12, 120, 38, 18, 38, 38], hidden=(7, 8, 9, 10), wrap=(1, 2, 3, 6))
-    days = [[s.title, d.ordinal, d.label, d.content_text, ' | '.join(d.transport_labels), d.id, *keys]
-            for d in sorted(s.days, key=lambda x: (x.ordinal, x.id))]
-    sheet('Lịch trình', 'Mỗi ngày / biến thể một dòng. Ô dài giữ toàn bộ nội dung; đọc thêm ở thanh công thức.',
-           ['Tên tour', 'Ngày thứ', 'Tiêu đề ngày', 'Nội dung ngày đầy đủ',
-            'Phương tiện / nhãn nguồn', 'ID ngày', *KEY_HEADERS], days,
-           [38, 12, 52, 120, 34, 38, 18, 38, 38], hidden=(6, 7, 8, 9), wrap=(1, 3, 4, 5))
-    departures, prices = [], []
-    for d in s.departures:
-        departures.append([s.title, d.source_schedule_id, _local(d.departure_at), d.departure_raw,
-                           d.seats, d.seats_raw, _amount(d.price_from), d.price_from_raw, d.currency,
-                           d.features, d.booking_href, _local(d.observed_at), d.id, *keys])
-        for c in d.price_cells:
-            prices.append([s.title, d.source_schedule_id, _local(d.departure_at), d.departure_raw,
-                           c.price_label, c.age_label or 'Ô chung', ' | '.join(c.applicable_labels),
-                           _amount(c.amount), c.raw_value, c.currency,
-                           'Có — không nhân giá' if c.colspan > 1 else 'Không',
-                           c.rowspan, c.colspan, c.row_index, c.column_index, c.id, d.id, *keys])
-    sheet('Lịch khởi hành', 'Một dòng / observation; giữ xung đột và ngày thiếu. Booking chỉ tham chiếu.',
-           ['Tên tour', 'ID lịch', 'Khởi hành (VN)', 'Ngày — nguyên văn', 'Chỗ còn', 'Chỗ — nguyên văn',
-            'Giá từ', 'Giá — nguyên văn', 'Tiền tệ', 'Đặc điểm', 'Booking — tham chiếu',
-            'Quan sát lúc (VN)', 'ID observation', *KEY_HEADERS], departures,
-           [38, 13, 23, 24, 12, 18, 19, 24, 12, 40, 65, 23, 38, 18, 38, 38],
-           hidden=(13, 14, 15, 16), wrap=(1, 8, 10, 11), money=(7,), dates=(3, 12))
-    sheet('Giá chi tiết', 'Một dòng / ô giá. Ô chung tô vàng, không nhân giá; 0đ không suy diễn miễn phí.',
-                ['Tên tour', 'ID lịch', 'Khởi hành (VN)', 'Ngày — nguyên văn', 'Loại giá', 'Nhóm tuổi',
-                 'Nhóm áp dụng', 'Số tiền', 'Giá — nguyên văn', 'Tiền tệ', 'Ô chung', 'Rowspan', 'Colspan',
-                 'Dòng nguồn', 'Cột nguồn', 'ID ô giá', 'ID observation', *KEY_HEADERS], prices,
-                [38, 13, 23, 24, 28, 26, 65, 19, 23, 12, 25, 12, 12, 13, 13, 38, 38, 18, 38, 38],
-                hidden=tuple(range(12, 21)), wrap=(1, 5, 6, 7, 9, 11), money=(8,), dates=(3,))
-    media = [[s.title, m.role, LABELS.get(m.section_key, m.section_key), m.day_ordinal,
-              m.caption or m.alt, m.url, m.alt, m.original_url, m.id, *keys] for m in s.media]
-    links = defaultdict(set)
-    for item in [*s.sections, *s.days]:
-        context = LABELS.get(item.key, item.key) if hasattr(item, 'key') else item.label
-        for link in BeautifulSoup(item.content_html, 'html.parser').select('a[href]'):
-            if link['href']:
-                links[(urljoin(s.canonical_url, link['href']), link.get_text(' ', strip=True))].add(context)
-    for (url, label), contexts in sorted(links.items()):
-        media.append([s.title, 'Booking (tham chiếu)' if '/booking' in urlsplit(url).path else 'Link nội dung',
-                      ' | '.join(sorted(contexts)), None, label, url, '', '', '', *keys])
-    sheet('Ảnh và link', 'Chỉ URL, không tải ảnh. Link trùng nhãn/đích được gom; booking không hyperlink.',
-           ['Tên tour', 'Loại', 'Thuộc mục', 'Ngày thứ', 'Mô tả', 'URL', 'Alt ảnh',
-            'URL nguyên văn', 'ID media', *KEY_HEADERS], media,
-           [38, 25, 32, 12, 45, 85, 45, 55, 38, 18, 38, 38],
-           hidden=(8, 9, 10, 11, 12), wrap=(1, 2, 3, 5, 6, 7), urls=(6,))
-    return sheets
+def _project(item, name, **foreign_keys):
+    row = []
+    for column in COLUMNS[name]:
+        value = foreign_keys[column] if column in foreign_keys else getattr(item, column)
+        if column in MONEY[name]:
+            value = _amount(value)
+        elif column in DATES[name]:
+            value = _local(value)
+        elif isinstance(value, (list, dict)):
+            value = json.dumps(value, ensure_ascii=False)
+        row.append(value)
+    return row
+
+
+def _rows(snapshot):
+    tour = snapshot.source_tour_id
+    return {
+        'tour_snapshots': [_project(snapshot, 'tour_snapshots')],
+        'tour_sections': [_project(x, 'tour_sections', snapshot_id=snapshot.id, source_tour_id=tour)
+                          for x in sorted(snapshot.sections, key=lambda x: (x.ordinal, x.id))],
+        'itinerary_days': [_project(x, 'itinerary_days', snapshot_id=snapshot.id, source_tour_id=tour)
+                           for x in sorted(snapshot.days, key=lambda x: (x.ordinal, x.id))],
+        'departure_observations': [
+            _project(x, 'departure_observations', snapshot_id=snapshot.id, source_tour_id=tour)
+            for x in snapshot.departures],
+        'price_cells': [
+            _project(cell, 'price_cells', departure_id=departure.id, source_tour_id=tour,
+                     source_schedule_id=departure.source_schedule_id)
+            for departure in snapshot.departures for cell in departure.price_cells],
+        'tour_media': [_project(x, 'tour_media', snapshot_id=snapshot.id, source_tour_id=tour)
+                       for x in sorted(snapshot.media, key=lambda x: (x.ordinal, x.id))],
+    }
 
 
 def export_excel(storage, run_id, output_dir, version=None):
     snapshot = storage.get_snapshot(run_id, version)
     if snapshot is None:
         raise ValueError('No snapshot for Excel export; use JSON report')
-    book = _workbook(snapshot, storage.get_run(run_id))
+    book = _workbook(snapshot)
     directory = Path(output_dir) / run_id
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / (snapshot.parser_version + '.xlsx')
@@ -209,21 +250,11 @@ def export_excel(storage, run_id, output_dir, version=None):
     return path, snapshot.status
 
 
-def _highlight_shared_prices(ws, rows):
-    for ri, values in enumerate(rows, 5):
-        if values[10] == 'Có — không nhân giá':
-            for cell in ws[ri][:11]:
-                cell.fill = PatternFill('solid', fgColor='FFF3D6')
-            ws.cell(ri, 11).comment = Comment('Một ô nguồn gộp nhiều cột; không nhân số tiền.', 'Đối soát')
-
-
-def _workbook(snapshot, run):
+def _workbook(snapshot):
     book = Workbook()
     book.remove(book.active)
-    for name, sheet in _snapshot_rows(snapshot, run).items():
-        ws = _sheet(book, name, **sheet)
-        if name == 'Giá chi tiết':
-            _highlight_shared_prices(ws, sheet['rows'])
+    for name, rows in _rows(snapshot).items():
+        _sheet(book, name, rows)
     book.active = 0
     return book
 
@@ -244,64 +275,21 @@ def _display_snapshot(storage, row):
 
 
 def _batch_workbook(storage, batch, rows, *, delta):
-    from ..models import Snapshot
-    from ..errors import error_message
-    empty = Snapshot('', '', id='')
-    schema = _snapshot_rows(empty, {'started_at': None})
-    for sheet in schema.values():
-        sheet['rows'] = []
-    extra = ['Khả dụng', 'Lý do khả dụng', 'Trong listing', 'Loại thay đổi',
-             'Kiểm tra thành công (VN)', 'Lỗi tải', 'ID catalogue']
+    combined = {name: [] for name in COLUMNS}
     for row in rows:
         if delta and not row['change_kinds']:
             continue
-        state = row['frozen_state']
         snapshot = _display_snapshot(storage, row)
-        run = storage.get_run(snapshot.run_id) if snapshot else {'started_at': None}
-        data = _snapshot_rows(snapshot or Snapshot('', '', id='', title=state['listing_title'],
-                              canonical_url=state['canonical_url'], source_tour_id=state['source_tour_id'] or '',
-                              status='pending'), run)
-        checked = state['last_successful_check_at']
-        checked = datetime.fromisoformat(checked) if isinstance(checked, str) else checked
-        metadata = [state['availability'], state['availability_reason'], 'Có' if state['is_listed'] else 'Không',
-                    ', '.join(row['change_kinds']), _local(checked),
-                    '\n'.join(error_message(e) for e in row['errors']), row['tour_id']]
-        for name, sheet in data.items():
-            for values in sheet['rows']:
-                if name == 'Danh sách tour':
-                    if snapshot is None:
-                        values[5] = None  # Unknown schedules are not zero.
-                    values.extend(metadata)
-                else:
-                    values.append(row['tour_id'])
-                schema[name]['rows'].append(values)
+        if snapshot is None:
+            # Catalogue-only records stay in PostgreSQL; never fabricate source rows.
+            continue
+        for name, values in _rows(snapshot).items():
+            combined[name].extend(values)
     book = Workbook()
     book.remove(book.active)
-    explicit = any(isinstance(e, dict) and e.get('schema') == 'explicit-target-v1' for e in batch['errors'])
-    mode = 'explicit-target (không discovery, không đánh giá catalogue)' if explicit else 'discovery'
-    note = (f'Batch {batch["id"]}; {mode}; {"DELTA" if delta else "FULL"}; '
-            f'trạng thái tải={batch["status"]}; dữ liệu theo refs đã freeze.')
-    for name, sheet in schema.items():
-        headers = sheet['headers'] + (extra if name == 'Danh sách tour' else ['ID catalogue'])
-        if name == 'Danh sách tour':
-            headers[6] = 'Chất lượng dữ liệu'
-        widths = sheet['widths'] + ([18, 24, 16, 28, 24, 55, 38] if name == 'Danh sách tour' else [38])
-        hidden = [*sheet['hidden'], len(headers)]
-        money = [i for i, h in enumerate(headers, 1) if h in {'Giá quảng bá', 'Giá từ', 'Số tiền'}]
-        dates = [i for i, h in enumerate(headers, 1) if h in {'Crawl lúc (VN)', 'Khởi hành (VN)',
-                  'Quan sát lúc (VN)', 'Kiểm tra thành công (VN)'}]
-        urls = [i for i, h in enumerate(headers, 1) if h in {'URL', 'URL nguồn'}]
-        ws = _sheet(book, name, note, headers, sheet['rows'], widths, hidden=hidden,
-                    wrap=tuple(i for i in range(1, len(headers) + 1) if i not in hidden), money=money, dates=dates, urls=urls)
-        if name == 'Giá chi tiết':
-            _highlight_shared_prices(ws, sheet['rows'])
-    journal = [[batch['id'], 'batch', batch['status'], '', '', json.dumps(batch['counts'], ensure_ascii=False),
-                '\n'.join(error_message(e) for e in batch['errors'])]]
-    journal += [[batch['id'], row['tour_id'], row['outcome'], row['selection_reason'],
-                 ', '.join(row['change_kinds']), ', '.join(row['attempt_run_ids']),
-                 '\n'.join(error_message(e) for e in row['errors'])] for row in rows]
-    _sheet(book, 'Nhật ký tải', note, ['Batch ID', 'Entity', 'Kết quả', 'Lý do chọn', 'Thay đổi', 'Counts / run IDs', 'Lỗi'],
-           journal, [38, 38, 18, 24, 28, 60, 90], wrap=(4, 5, 6, 7))
+    for name, values in combined.items():
+        _sheet(book, name, values)
+    book.active = 0
     return book
 
 
@@ -321,7 +309,7 @@ def export_batch_excel(storage, batch_id, output_dir):
     def validate_bundle():
         try:
             manifest = json.loads((directory / '.bundle.json').read_text())
-            if manifest['schema'] != 'v1' or manifest['batch_id'] != batch_id or manifest['frozen'] != frozen:
+            if manifest['schema'] not in BUNDLE_SCHEMAS or manifest['batch_id'] != batch_id or manifest['frozen'] != frozen:
                 raise ValueError('Incompatible Excel bundle; use another output-dir')
             for name in filenames:
                 if sha256((directory / name).read_bytes()).hexdigest() != manifest['files'][name]:
@@ -337,7 +325,7 @@ def export_batch_excel(storage, batch_id, output_dir):
         receipt = batch['export_manifest']
         if receipt:
             files = receipt.get('files') if isinstance(receipt, dict) else None
-            if (not isinstance(receipt, dict) or receipt.get('schema') != 'v1'
+            if (not isinstance(receipt, dict) or receipt.get('schema') not in BUNDLE_SCHEMAS
                     or receipt.get('batch_id') != batch_id or receipt.get('frozen') != frozen
                     or not isinstance(receipt.get('directory'), str) or not receipt['directory']
                     or not isinstance(files, dict) or set(files) != set(filenames)
@@ -348,7 +336,7 @@ def export_batch_excel(storage, batch_id, output_dir):
             manifest = validate_bundle()
         else:
             temporary = Path(tempfile.mkdtemp(prefix=f'.{batch_id}-', dir=directory.parent))
-            manifest = {'schema': 'v1', 'batch_id': batch_id, 'frozen': frozen, 'files': {}}
+            manifest = {'schema': NEW_BUNDLE_SCHEMA, 'batch_id': batch_id, 'frozen': frozen, 'files': {}}
             for name, delta in zip(filenames, (True, False)):
                 book = _batch_workbook(storage, batch, rows, delta=delta)
                 try:
